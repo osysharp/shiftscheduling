@@ -1,0 +1,722 @@
+// The kit's pages, served at its routes in every app that uses it — in the app's own shell and theme:
+//
+//     /shifts                    MyShiftsPage        the signed-in person's shifts, open shifts, cover, time off
+//     /staff/rota                RotaWeekPage        the manager's week: build, fill, publish, hours
+//     /staff/rota/requests       RotaRequestsPage    time off and cover waiting for an answer
+//     /staff/rota/positions      RotaPositionsPage   positions, and what working one requires
+//
+// ⚑ AN APP TAKES ONE OVER by declaring a component of the same name — with a `[Route]` of its own it is served there
+//   instead; without one, the address is not served. The parts (`MyShifts`, `RotaWeek`, `RotaRequests`, `RotaPositions`,
+//   `ShiftCardView`) are `[Composable]`, for a page of the app's own. Every colour, face and size is a theme token, so a
+//   look re-skins them.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+using Osysharp.Ui;
+
+// ── the pages ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The signed-in person's shifts.
+[Route("/shifts")] [Layout(WorkspaceFrame)] [Authorize(SeesShifts)] [Render(CSR)] [Title("Your shifts")]
+[Nav("My shifts", Order = 40)]
+public component MyShiftsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1040px") {
+      PageHead("Your shifts", subtitle: "Where you work next, shifts you can pick up, and the days you are away.");
+      MyShifts();
+    }
+  }
+}
+
+/// The manager's week.
+[Route("/staff/rota")] [Layout(WorkspaceFrame)] [Authorize(ManagesShifts)] [Render(CSR)] [Title("Rota")]
+[Nav("Rota", Order = 41)]
+public component RotaWeekPage() {
+  render {
+    Stack(gap: 6, w: "100%") {
+      PageHead("Rota", subtitle: "Build the week as drafts, fill the places, then publish it to everyone on it.");
+      RotaWeek();
+    }
+  }
+}
+
+/// Time off and cover waiting for an answer.
+[Route("/staff/rota/requests")] [Layout(WorkspaceFrame)] [Authorize(ManagesShifts)] [Render(CSR)] [Title("Rota requests")]
+public component RotaRequestsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1040px") {
+      PageHead("Requests", subtitle: "Time off and cover people have asked for, and who is away.");
+      RotaRequests();
+    }
+  }
+}
+
+/// Positions, and what working one requires.
+[Route("/staff/rota/positions")] [Layout(WorkspaceFrame)] [Authorize(ManagesShifts)] [Render(CSR)] [Title("Positions")]
+public component RotaPositionsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "960px") {
+      PageHead("Positions", subtitle: "The kinds of work a shift is for, and what a person must hold to work one.");
+      RotaPositions();
+    }
+  }
+}
+
+// ── the parts ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One shift as a card — when, what, where, how full — with the actions passed in.
+[Composable, Part]
+public component ShiftCardView(ShiftCard s, string note = "") {
+  render {
+    Stack(gap: 2, p: 4, bg: Colors.Surface, borderW: 1, border: s.Draft ? Colors.Border : Colors.Border, rounded: Radius.Lg,
+          role: UiRole.ListItem, label: s.Title + " " + s.When, opacity: s.Cancelled ? 0.6 : 1) {
+      Row(gap: 3, align: Align.Start, wrap: Wrapping.Wrap) {
+        Stack(gap: 0, grow: 1, minW: "0") {
+          Text(s.Title, fontWeight: FontWeight.Semibold);
+          Text(s.When + (s.Position != "" ? " · " + s.Position : "") + (s.Location != "" ? " · " + s.Location : ""),
+               fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+        if (s.Cancelled) { Badge("Cancelled", tone: Tone.Danger); }
+        else if (s.Draft) { Badge("Draft", tone: Tone.Ghost); }
+        else if (s.Filled >= s.Needed) { Badge($"{s.Filled} of {s.Needed}", tone: Tone.Success); }
+        else { Badge($"{s.Filled} of {s.Needed}", tone: Tone.Warning); }
+      }
+      if (s.Crew.Count > 0) { Text(string.Join(", ", s.Crew), fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+      if (note != "") { Text(note, fontSize: FontSize.Caption, color: Colors.Primary); }
+      Row(gap: 2, wrap: Wrapping.Wrap) { Slot; }
+    }
+  }
+}
+
+/// The signed-in person's rota: their shifts (ask for cover, drop where allowed), open shifts to claim, cover they could
+/// take, their time off and the hours they are never free. In a test: `Ui.Click("Claim", within: "Bar · Sat 17 Oct")`.
+[Composable]
+[Authorize(SeesShifts)]
+public component MyShifts() {
+  MyRota view = new MyRota();
+  string done = "";
+  string problem = "";
+  // asking for cover
+  Guid covering = Guid.Empty;
+  string coverTitle = "";
+  string coverWhy = "";
+  // asking for time off
+  bool askingOff = false;
+  DateOnly? offFrom = null;
+  DateOnly? offTo = null;
+  string offWhy = "";
+  // not free
+  bool markingBusy = false;
+  DayOfWeek busyDay = DayOfWeek.Monday;
+  bool busyAllDay = true;
+  TimeOnly busyFrom = new TimeOnly(9, 0);
+  TimeOnly busyUntil = new TimeOnly(17, 0);
+
+  on mount { view = MyRotaView(); }
+  action Reload() { view = MyRotaView(); }
+  action Claim(ShiftCard s) {
+    done = ""; problem = "";
+    var outcome = ClaimShift(Shift.Single(x => x.Id == s.Id));
+    if (outcome.IsAssigned) { done = outcome.Message; } else { problem = outcome.Message; }
+    Reload();
+  }
+  action Take(CoverLine c) {
+    done = ""; problem = "";
+    try {
+      var r = AcceptCover(ShiftCoverRequest.Single(x => x.Id == c.Id));
+      done = r.State == CoverState.Covered ? $"{c.Shift.Title} is yours." : $"You are taking {c.Shift.Title} — it waits for approval.";
+      Reload();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action AskCover(PlaceCard p) { covering = p.Id; coverTitle = p.Shift.Title; coverWhy = ""; problem = ""; }
+  action StopCover() { covering = Guid.Empty; }
+  action SendCover() {
+    problem = "";
+    try {
+      RequestCover(ShiftAssignment.Single(a => a.Id == covering), coverWhy);
+      done = $"You asked for cover for {coverTitle}."; covering = Guid.Empty;
+      Reload();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action TakeBack(PlaceCard p) {
+    done = ""; problem = "";
+    try { WithdrawCover(ShiftCoverRequest.Single(c => c.Id == p.CoverId)); done = "You took the request back."; Reload(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action Drop(PlaceCard p) {
+    done = ""; problem = "";
+    try { DropShift(ShiftAssignment.Single(a => a.Id == p.Id)); done = $"You are off {p.Shift.Title}."; Reload(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartOff() { askingOff = true; offFrom = null; offTo = null; offWhy = ""; problem = ""; }
+  action StopOff() { askingOff = false; }
+  action SendOff() {
+    problem = "";
+    if (offFrom == null) { problem = "Choose the first day."; return; }
+    try {
+      RequestTimeOff(offFrom!.Value, offTo == null ? offFrom!.Value : offTo!.Value, offWhy);
+      done = "You asked for time off."; askingOff = false;
+      Reload();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action WithdrawOff(TimeOffLine l) {
+    done = ""; problem = "";
+    try { WithdrawTimeOff(TimeOffRequest.Single(r => r.Id == l.Id)); done = "Your request is withdrawn."; Reload(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartBusy() { markingBusy = true; busyAllDay = true; problem = ""; }
+  action StopBusy() { markingBusy = false; }
+  action SendBusy() {
+    problem = "";
+    try {
+      var me = CurrentPrincipal();
+      MarkUnavailable(me!, busyDay, busyAllDay ? new TimeOnly(0, 0) : busyFrom, busyAllDay ? new TimeOnly(0, 0) : busyUntil);
+      markingBusy = false; done = "Noted — you will not be put on shifts then without being asked.";
+      Reload();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Free(Unavailability u) {
+    done = ""; problem = "";
+    try { ForgetUnavailability(u); Reload(); } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 6) {
+      Row(gap: 6, wrap: Wrapping.Wrap) {
+        Metric("hours this week", text: view.WeekHours.ToString("0.##"));
+        Metric("next shift", text: view.Next != "" ? view.Next : "None yet");
+      }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Stack(gap: 2) {
+        SectionLabel("Coming up");
+        Stack(gap: 3, role: UiRole.List, label: "Coming up") {
+          if (view.Places.Count == 0) { EmptyState("No shifts yet", body: "Shifts you are put on, or pick up, appear here once they are on the rota."); }
+          foreach (var p in view.Places) {
+            ShiftCardView(p.Shift, note: p.Cover) {
+              if (p.Cover == "") { Button("Ask for cover", onPress: () => AskCover(p), size: Size.Sm, tone: Tone.Ghost); }
+              if (p.Cover != "") { Button("Take the request back", onPress: () => TakeBack(p), size: Size.Sm, tone: Tone.Ghost); }
+              if (p.CanDrop && p.Cover == "") { Button("Drop", onPress: () => Drop(p), size: Size.Sm, tone: Tone.Danger); }
+            }
+          }
+        }
+      }
+      if (view.Offers.Count > 0) {
+        Stack(gap: 2) {
+          SectionLabel("Cover you could take");
+          Stack(gap: 3, role: UiRole.List, label: "Cover you could take") {
+            foreach (var c in view.Offers) {
+              ShiftCardView(c.Shift, note: (c.Swap ? c.From + " offers a swap for your " + c.SwapFor : c.From + " asks for cover")
+                                          + (c.Reason != "" ? ": " + c.Reason : "")) {
+                Button(c.Swap ? "Swap" : "Take it", onPress: () => Take(c), size: Size.Sm, tone: Tone.Primary);
+              }
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        SectionLabel("Open shifts");
+        Stack(gap: 3, role: UiRole.List, label: "Open shifts") {
+          if (view.Open.Count == 0) { EmptyState("Nothing open for you", body: "A shift with a free place you can work appears here."); }
+          foreach (var s in view.Open) {
+            ShiftCardView(s) { Button("Claim", onPress: () => Claim(s), size: Size.Sm, tone: Tone.Primary); }
+          }
+        }
+      }
+      Row(gap: 6, align: Align.Start, wrap: Wrapping.Wrap) {
+        Stack(gap: 2, grow: 1, minW: "280px") {
+          Row(gap: 2, align: Align.Center) {
+            Box(grow: 1) { SectionLabel("Time off"); }
+            Button("Ask for time off", onPress: StartOff, size: Size.Sm);
+          }
+          Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+                role: UiRole.List, label: "Time off") {
+            if (view.TimeOff.Count == 0) { Box(p: 4) { Text("No time off asked for.", color: Colors.TextMuted); } }
+            foreach (var l in view.TimeOff) {
+              Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Days) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(l.Days, fontWeight: FontWeight.Medium);
+                  if (l.Reason != "") { Text(l.Reason, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+                }
+                Badge(l.State, tone: l.State == "Approved" ? Tone.Success : l.Waiting ? Tone.Warning : Tone.Ghost);
+                if (l.CanWithdraw) { Button("Withdraw", onPress: () => WithdrawOff(l), size: Size.Sm, tone: Tone.Ghost); }
+              }
+            }
+          }
+        }
+        Stack(gap: 2, grow: 1, minW: "280px") {
+          Row(gap: 2, align: Align.Center) {
+            Box(grow: 1) { SectionLabel("When you are not free"); }
+            Button("Add", onPress: StartBusy, size: Size.Sm);
+          }
+          Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+                role: UiRole.List, label: "When you are not free") {
+            if (view.NotFree.Count == 0) { Box(p: 4) { Text("Free any time.", color: Colors.TextMuted); } }
+            foreach (var u in view.NotFree) {
+              Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: UnavailabilityText(u)) {
+                Text(UnavailabilityText(u), grow: 1);
+                Button("Remove", onPress: () => Free(u), size: Size.Sm, tone: Tone.Ghost);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (covering != Guid.Empty) {
+      Dialog("Ask for cover for " + coverTitle, onDismiss: StopCover, subtitle: "Everyone who could work it sees the request. You stay on the shift until somebody takes it.") {
+        Field("Why (optional)", value: coverWhy);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopCover, tone: Tone.Ghost);
+          Button("Ask for cover", onPress: SendCover, tone: Tone.Primary);
+        }
+      }
+    }
+    if (askingOff) {
+      Dialog("Ask for time off", onDismiss: StopOff, subtitle: "Whoever runs the rota approves it. You are not put on shifts on approved days.") {
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { DatePicker("First day", value: offFrom); }
+          Box(w: "200px") { DatePicker("Last day", value: offTo, clearable: true, placeholder: "The same day"); }
+        }
+        Field("Why (optional)", value: offWhy);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopOff, tone: Tone.Ghost);
+          Button("Send request", onPress: SendOff, tone: Tone.Primary);
+        }
+      }
+    }
+    if (markingBusy) {
+      Dialog("When are you not free?", onDismiss: StopBusy, subtitle: "Every week. You can still be asked; you will not be put on then without it.") {
+        Box(w: "220px") { Dropdown("Day", value: busyDay); }
+        Checkbox("The whole day", value: busyAllDay);
+        if (!busyAllDay) {
+          Row(gap: 3, wrap: Wrapping.Wrap) {
+            Box(w: "160px") { TimePicker("From", value: busyFrom, minuteStep: 15); }
+            Box(w: "160px") { TimePicker("Until", value: busyUntil, minuteStep: 15); }
+          }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopBusy, tone: Tone.Ghost);
+          Button("Save", onPress: SendBusy, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}
+
+/// The manager's week: seven days of shifts, each with how full it is; add, change, fill, publish, cancel; copy last
+/// week; everybody's hours. In a test: `Ui.Click("Add a shift")`, `Ui.Click("Bar · 18:00–23:00")`, `Ui.Click("Publish")`.
+[Composable]
+[Authorize(ManagesShifts)]
+public component RotaWeek() {
+  DateOnly? day = null;
+  RotaWeekView view = new RotaWeekView();
+  List<ShiftPosition> positions = [];
+  string done = "";
+  string problem = "";
+  // a shift being added or changed
+  bool editing = false;
+  Guid editingId = Guid.Empty;
+  string title = "";
+  ShiftPosition? position = null;
+  DateOnly? onDay = null;
+  TimeOnly starts = new TimeOnly(9, 0);
+  TimeOnly ends = new TimeOnly(17, 0);
+  int needed = 1;
+  int breakMinutes = 0;
+  string location = "";
+  string note = "";
+  // a shift opened
+  Guid open = Guid.Empty;
+  ShiftCard opened = new ShiftCard();
+  List<ShiftAssignment> crew = [];
+  string search = "";
+  List<RotaPerson> found = [];
+  string confirm = "";
+  Guid confirmFor = Guid.Empty;
+
+  on mount { Load(); }
+  action Load() { view = RotaWeekOfDay(day); positions = ShiftPosition.Where(p => p.Active).OrderBy(p => p.SortOrder).ThenBy(p => p.Name).Take(100).ToList(); }
+  action Prev() { day = view.Monday.AddDays(-7); Load(); }
+  action Next() { day = view.Monday.AddDays(7); Load(); }
+  action ThisWeek() { day = null; Load(); }
+  action Publish() {
+    done = ""; problem = "";
+    var n = PublishShifts(RotaDayStart(view.Monday), RotaDayStart(view.Monday.AddDays(7)));
+    done = n == 1 ? "1 shift is on the rota." : $"{n} shifts are on the rota.";
+    Load();
+  }
+  action CopyLast() {
+    done = ""; problem = "";
+    var n = CopyWeek(view.Monday.AddDays(-7), view.Monday);
+    done = n == 0 ? "Last week had no shifts to copy." : $"{n} shifts copied from last week, as drafts.";
+    Load();
+  }
+  action StartNew(DateOnly d) {
+    editingId = Guid.Empty; title = ""; position = null; onDay = d; starts = new TimeOnly(9, 0); ends = new TimeOnly(17, 0);
+    needed = 1; breakMinutes = 0; location = ""; note = ""; problem = ""; editing = true;
+  }
+  action StartEdit() {
+    var s = Shift.Single(x => x.Id == open);
+    var a = RotaLocal(s.StartsAt);
+    editingId = s.Id; title = s.Title; position = s.Position; onDay = DateOnly.FromDateTime(a);
+    starts = TimeOnly.FromDateTime(a); ends = TimeOnly.FromDateTime(RotaLocal(s.EndsAt));
+    needed = s.Needed; breakMinutes = s.BreakMinutes; location = s.Location; note = s.Note; problem = ""; open = Guid.Empty; editing = true;
+  }
+  action StopEdit() { editing = false; }
+  action Save() {
+    problem = "";
+    if (title.Trim() == "") { problem = "Give the shift a name."; return; }
+    if (onDay == null) { problem = "Choose the day."; return; }
+    var startsAt = RotaZone().Resolve(onDay!.Value, starts);
+    // An end at or before the start is the next morning — a night shift.
+    var endsAt = RotaZone().Resolve(ends > starts ? onDay!.Value : onDay!.Value.AddDays(1), ends);
+    try {
+      if (editingId == Guid.Empty) {
+        AddShift(title, startsAt, endsAt, needed, position, breakMinutes, location, note);
+        done = $"{title.Trim()} is added as a draft.";
+      } else {
+        var s = Shift.Single(x => x.Id == editingId);
+        s.Title = title.Trim(); s.Position = position; s.BreakMinutes = breakMinutes; s.Location = location.Trim(); s.Note = note.Trim();
+        UnitOfWork.Commit();
+        UpdateShift(s, startsAt, endsAt, needed);
+        done = $"{s.Title} is saved.";
+      }
+      editing = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Open(ShiftCard s) { open = s.Id; opened = s; search = ""; found = []; confirm = ""; problem = ""; crew = CrewOf(Shift.Single(x => x.Id == s.Id)); }
+  action Close() { open = Guid.Empty; }
+  action Reopen() { var s = Shift.Single(x => x.Id == open); opened = ShiftCardOf(s); crew = CrewOf(s); Load(); }
+  action Find() { found = FindRotaPeople(search); }
+  action Put(Guid person, bool anyway) {
+    problem = ""; confirm = "";
+    var outcome = AssignShift(Shift.Single(x => x.Id == open), Principal.Single(p => p.Id == person), anyway);
+    if (outcome.IsAssigned) { done = outcome.Message; found = []; search = ""; Reopen(); }
+    else if (outcome.Result == ShiftResult.NeedsConfirmation) { confirm = outcome.Message; confirmFor = person; }
+    else { problem = outcome.Message; }
+  }
+  action TakeOff(ShiftAssignment a) {
+    problem = "";
+    try { var name = RotaName(a.Worker); Unassign(a); done = $"{name} is off {opened.Title}."; Reopen(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action PublishOne() {
+    problem = "";
+    try { PublishShift(Shift.Single(x => x.Id == open)); done = $"{opened.Title} is on the rota."; Reopen(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action CancelIt() {
+    problem = "";
+    try { CancelShift(Shift.Single(x => x.Id == open)); done = $"{opened.Title} is cancelled; the people on it are told."; open = Guid.Empty; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action DeleteIt() {
+    problem = "";
+    try { DeleteDraftShift(Shift.Single(x => x.Id == open)); done = $"{opened.Title} is deleted."; open = Guid.Empty; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 5) {
+      Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+        Button("‹ Previous week", onPress: Prev, size: Size.Sm, tone: Tone.Ghost);
+        Text(view.Title, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+        Button("Next week ›", onPress: Next, size: Size.Sm, tone: Tone.Ghost);
+        Button("This week", onPress: ThisWeek, size: Size.Sm, tone: Tone.Ghost);
+        Spacer();
+        Button("Copy last week", onPress: CopyLast, size: Size.Sm, tone: Tone.Ghost);
+        Button(view.Drafts == 0 ? "Publish" : view.Drafts == 1 ? "Publish 1 draft" : $"Publish {view.Drafts} drafts", onPress: Publish, size: Size.Sm, tone: Tone.Primary,
+               disabled: view.Drafts == 0);
+      }
+      Row(gap: 6, wrap: Wrapping.Wrap) {
+        Metric("drafts", text: view.Drafts.ToString());
+        Metric("open places", text: view.OpenPlaces.ToString());
+        Metric("hours on the rota", text: view.Hours.ToString("0.##"));
+      }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "" && open == Guid.Empty && !editing) { Alert(problem, tone: Tone.Danger); }
+      Box(display: Display.Grid, cols: Layout.AtLeast(Laptop) ? "repeat(7, minmax(0, 1fr))" : "1fr", gap: 3, role: UiRole.List, label: "Days") {
+        foreach (var d in view.Days) {
+          Stack(gap: 2, role: UiRole.ListItem, label: d.Label, minW: "0") {
+            Row(gap: 1, align: Align.Center) {
+              Text(d.Label, fontWeight: FontWeight.Semibold, grow: 1);
+              IconButton("Add a shift on " + d.Label, onPress: () => StartNew(d.Day), size: Size.Sm, tone: Tone.Ghost) { Text("+"); }
+            }
+            if (d.Shifts.Count == 0) { Text("—", color: Colors.TextMuted, fontSize: FontSize.Caption); }
+            foreach (var s in d.Shifts) {
+              Pressable(onClick: () => Open(s), label: s.Title + " · " + s.Times) {
+                Stack(gap: 1, p: 3, rounded: Radius.Md, borderW: 1, border: Colors.Border,
+                      bg: s.Cancelled ? Colors.Surface : s.Draft ? Colors.Surface : s.Filled >= s.Needed ? Colors.Success.Subtle : Colors.Warning.Subtle,
+                      opacity: s.Cancelled ? 0.6 : 1) {
+                  Text(s.Times, fontSize: FontSize.Caption, fontFamily: Font.Mono, color: Colors.TextMuted);
+                  Text(s.Title, fontWeight: FontWeight.Medium);
+                  if (s.Position != "") { Text(s.Position, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+                  Text(s.Cancelled ? "Cancelled" : (s.Draft ? "Draft · " : "") + $"{s.Filled} of {s.Needed}", fontSize: FontSize.Caption,
+                       color: s.Filled >= s.Needed ? Colors.TextSecondary : Colors.TextMuted);
+                }
+              }
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        SectionLabel("Hours this week");
+        Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+              role: UiRole.List, label: "Hours this week") {
+          if (view.People.Count == 0) { Box(p: 4) { Text("Nobody is on a shift this week yet.", color: Colors.TextMuted); } }
+          foreach (var p in view.People) {
+            Row(gap: 3, align: Align.Center, px: 4, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: p.Name) {
+              Text(p.Name, grow: 1);
+              Text(p.Shifts == 1 ? "1 shift" : $"{p.Shifts} shifts", color: Colors.TextMuted, fontSize: FontSize.Caption);
+              Text(p.Hours.ToString("0.##") + " h", fontVariant: FontVariant.TabularNums, w: "80px", textAlign: TextAlign.Right);
+            }
+          }
+        }
+      }
+    }
+    if (open != Guid.Empty) {
+      Dialog(opened.Title, onDismiss: Close, subtitle: opened.When + (opened.Position != "" ? " · " + opened.Position : "") + (opened.Location != "" ? " · " + opened.Location : "")) {
+        Row(gap: 2, wrap: Wrapping.Wrap) {
+          if (opened.Cancelled) { Badge("Cancelled", tone: Tone.Danger); }
+          else if (opened.Draft) { Badge("Draft", tone: Tone.Ghost); }
+          Badge($"{opened.Filled} of {opened.Needed}", tone: opened.Filled >= opened.Needed ? Tone.Success : Tone.Warning);
+          Badge(opened.Hours.ToString("0.##") + " h", tone: Tone.Ghost);
+        }
+        Stack(gap: 0, role: UiRole.List, label: "On this shift") {
+          foreach (var a in crew) {
+            Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: RotaName(a.Worker)) {
+              Text($"{a.Slot}.", color: Colors.TextMuted, w: "24px");
+              Text(RotaName(a.Worker), grow: 1);
+              if (!opened.Cancelled) { Button("Take off", onPress: () => TakeOff(a), size: Size.Sm, tone: Tone.Ghost); }
+            }
+          }
+        }
+        if (!opened.Cancelled && opened.Filled < opened.Needed) {
+          Row(gap: 2, align: Align.End) {
+            Box(grow: 1, minW: "0") { SearchField("Find a person", value: search) { } }
+            Button("Find", onPress: Find, size: Size.Sm);
+          }
+          Stack(gap: 0, role: UiRole.List, label: "People found") {
+            foreach (var h in found) {
+              Row(gap: 3, align: Align.Center, py: 2, role: UiRole.ListItem, label: h.Name) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(h.Name, fontWeight: FontWeight.Medium);
+                  Text(h.Email, fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+                Button("Put on", onPress: () => Put(h.Id, false), size: Size.Sm);
+              }
+            }
+          }
+        }
+        if (confirm != "") {
+          Alert(confirm + " Put them on anyway?", tone: Tone.Warning);
+          Row(gap: 2, justify: Justify.End) { Button("Put on anyway", onPress: () => Put(confirmFor, true), size: Size.Sm, tone: Tone.Primary); }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End, wrap: Wrapping.Wrap) {
+          if (opened.Draft) { Button("Delete draft", onPress: DeleteIt, tone: Tone.Danger, size: Size.Sm); }
+          if (!opened.Draft && !opened.Cancelled && !opened.Started) { Button("Cancel shift", onPress: CancelIt, tone: Tone.Danger, size: Size.Sm); }
+          if (!opened.Cancelled) { Button("Change", onPress: StartEdit, tone: Tone.Ghost, size: Size.Sm); }
+          if (opened.Draft) { Button("Publish", onPress: PublishOne, tone: Tone.Primary, size: Size.Sm); }
+          Button("Done", onPress: Close, tone: Tone.Ghost, size: Size.Sm);
+        }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == Guid.Empty ? "Add a shift" : "Change " + title, onDismiss: StopEdit,
+             subtitle: editingId == Guid.Empty ? "It is a draft until you publish it." : "The people on it are told if its times change.") {
+        Field("Name", value: title, placeholder: "Morning, front desk");
+        if (positions.Count > 0) { Dropdown("Position", value: position, options: positions, placeholder: "Any") { p => Text(p.Name); } }
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { DatePicker("Day", value: onDay); }
+          Box(w: "140px") { TimePicker("Starts", value: starts, minuteStep: 15); }
+          Box(w: "140px") { TimePicker("Ends", value: ends, minuteStep: 15); }
+        }
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "140px") { NumberField("People", value: needed, min: 1); }
+          Box(w: "160px") { NumberField("Break (minutes)", value: breakMinutes, min: 0); }
+          Box(w: "220px") { Field("Where", value: location); }
+        }
+        Field("Note", value: note);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopEdit, tone: Tone.Ghost);
+          Button("Save", onPress: Save, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}
+
+/// Time off and cover waiting for an answer, and who is away. In a test: `Ui.Click("Approve", within: "Ada Moreno")`.
+[Composable]
+[Authorize(ManagesShifts)]
+public component RotaRequests() {
+  List<TimeOffLine> waiting = [];
+  List<TimeOffLine> away = [];
+  List<CoverLine> cover = [];
+  string done = "";
+  string problem = "";
+
+  on mount { Load(); }
+  action Load() { waiting = TimeOffWaiting(); away = TimeOffAhead(); cover = CoverWaiting(); }
+  action DecideOff(TimeOffLine l, bool approve) {
+    done = ""; problem = "";
+    try {
+      var clashes = DecideTimeOff(TimeOffRequest.Single(r => r.Id == l.Id), approve);
+      done = !approve ? $"{l.Worker}'s request is declined."
+           : clashes.Count == 0 ? $"{l.Worker} is off {l.Days}."
+           : $"{l.Worker} is off {l.Days} — and on {clashes.Count} shift{(clashes.Count == 1 ? "" : "s")} then: " + string.Join(", ", clashes.Select(a => a.Shift.Title)) + ". Find cover.";
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action DecideSwap(CoverLine c, bool approve) {
+    done = ""; problem = "";
+    try {
+      DecideCover(ShiftCoverRequest.Single(x => x.Id == c.Id), approve);
+      done = approve ? $"{c.TakenBy} is on {c.Shift.Title}." : $"{c.From} stays on {c.Shift.Title}.";
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 6) {
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Stack(gap: 2) {
+        SectionLabel("Time off waiting");
+        Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+              role: UiRole.List, label: "Time off waiting") {
+          if (waiting.Count == 0) { Box(p: 4) { EmptyState("Nothing waiting", body: "Requests for time off appear here."); } }
+          foreach (var l in waiting) {
+            Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Worker) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(l.Worker + " · " + l.Days, fontWeight: FontWeight.Medium);
+                if (l.Reason != "") { Text(l.Reason, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+              }
+              Button("Decline", onPress: () => DecideOff(l, false), size: Size.Sm, tone: Tone.Ghost);
+              Button("Approve", onPress: () => DecideOff(l, true), size: Size.Sm, tone: Tone.Primary);
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        SectionLabel("Cover waiting for approval");
+        Stack(gap: 3, role: UiRole.List, label: "Cover waiting for approval") {
+          if (cover.Count == 0) { EmptyState("Nothing waiting", body: "When somebody takes a shift that was offered, it waits here for you."); }
+          foreach (var c in cover) {
+            ShiftCardView(c.Shift, note: c.Swap ? c.From + " and " + c.TakenBy + " swap — " + c.TakenBy + " gives " + c.SwapFor
+                                             : c.TakenBy + " takes it from " + c.From + (c.Reason != "" ? " (" + c.Reason + ")" : "")) {
+              Button("Decline", onPress: () => DecideSwap(c, false), size: Size.Sm, tone: Tone.Ghost);
+              Button("Approve", onPress: () => DecideSwap(c, true), size: Size.Sm, tone: Tone.Primary);
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        SectionLabel("Away");
+        Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+              role: UiRole.List, label: "Away") {
+          if (away.Count == 0) { Box(p: 4) { Text("Nobody is away.", color: Colors.TextMuted); } }
+          foreach (var l in away) {
+            Row(gap: 3, align: Align.Center, px: 4, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Worker) {
+              Text(l.Worker, grow: 1, fontWeight: FontWeight.Medium);
+              Text(l.Days, color: Colors.TextMuted);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Positions, and what working one requires. In a test: `Ui.Click("Add a position"); Ui.Fill("Name", "Kitchen")`.
+[Composable]
+[Authorize(ManagesShifts)]
+public component RotaPositions() {
+  List<ShiftPosition> positions = [];
+  List<PositionRequirement> requirements = [];
+  bool editing = false;
+  Guid editingId = Guid.Empty;
+  string name = "";
+  string description = "";
+  bool active = true;
+  string requirementKey = "";
+  string requirementLabel = "";
+  string done = "";
+  string problem = "";
+
+  on mount { Load(); }
+  action Load() {
+    positions = ShiftPosition.OrderBy(p => p.SortOrder).ThenBy(p => p.Name).Take(100).ToList();
+    requirements = PositionRequirement.Include(r => r.Position).OrderBy(r => r.Key).Take(500).ToList();
+  }
+  action StartNew() { editingId = Guid.Empty; name = ""; description = ""; active = true; requirementKey = ""; requirementLabel = ""; problem = ""; editing = true; }
+  action Edit(ShiftPosition p) { editingId = p.Id; name = p.Name; description = p.Description; active = p.Active; requirementKey = ""; requirementLabel = ""; problem = ""; editing = true; }
+  action Stop() { editing = false; }
+  action Save() {
+    problem = "";
+    try {
+      var p = editingId == Guid.Empty ? new ShiftPosition { Name = name.Trim(), SortOrder = positions.Count + 1 } : ShiftPosition.Single(x => x.Id == editingId);
+      p.Name = name.Trim(); p.Description = description.Trim(); p.Active = active;
+      if (requirementKey.Trim() != "") { new PositionRequirement { Position = p, Key = requirementKey.Trim(), Label = requirementLabel.Trim() }; }
+      UnitOfWork.Commit();
+      done = $"{p.Name} is saved."; editing = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Drop(PositionRequirement r) {
+    problem = "";
+    try { r.Delete(); UnitOfWork.Commit(); Load(); } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 4) {
+      Row(gap: 2, justify: Justify.End) { Button("Add a position", onPress: StartNew, tone: Tone.Primary, size: Size.Sm); }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
+            role: UiRole.List, label: "Positions") {
+        if (positions.Count == 0) { Box(p: 5) { EmptyState("No positions yet", body: "A shift can be for anyone; add a position when some work needs particular people."); } }
+        foreach (var p in positions) {
+          Stack(gap: 1, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: p.Name) {
+            Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(p.Name, fontWeight: FontWeight.Medium, color: p.Active ? Colors.OnSurface : Colors.TextMuted);
+                if (p.Description != "") { Text(p.Description, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+              }
+              if (!p.Active) { Badge("Retired", tone: Tone.Ghost); }
+              Button("Edit", onPress: () => Edit(p), size: Size.Sm, tone: Tone.Ghost);
+            }
+            Row(gap: 2, wrap: Wrapping.Wrap) {
+              foreach (var r in requirements.Where(r => r.Position.Id == p.Id).ToList()) {
+                FilterChip("Needs " + (r.Label != "" ? r.Label : r.Key), removeLabel: "Remove " + (r.Label != "" ? r.Label : r.Key), onRemove: () => Drop(r));
+              }
+            }
+          }
+        }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == Guid.Empty ? "Add a position" : "Change " + name, onDismiss: Stop, subtitle: "Shifts already made keep their position.") {
+        Field("Name", value: name, placeholder: "Front desk");
+        TextAreaField("What it is", value: description, rows: 2);
+        Checkbox("Offered for new shifts", value: active);
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(w: "200px") { Field("Requires (key)", value: requirementKey, placeholder: "first-aid", hint: "Answered by the app"); }
+          Box(w: "240px") { Field("Requirement, as people read it", value: requirementLabel, placeholder: "First aid certificate"); }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: Stop, tone: Tone.Ghost);
+          Button("Save", onPress: Save, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}

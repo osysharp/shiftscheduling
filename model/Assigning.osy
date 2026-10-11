@@ -1,0 +1,228 @@
+// Putting people on shifts and taking them off. One check — `WhyNotOnShift` — answers every way onto a shift, so a
+// claim, an assignment, cover and a swap are all refused for the same reasons, each a sentence a person can be shown.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// What asking for a place came to. ⚠ Appended, never inserted.
+public enum ShiftResult {
+  /// On the shift.
+  Assigned,
+  /// Refused — `Message` says why.
+  Refused,
+  /// Allowed only knowingly: the person said they are not free then, or it takes them past the week's hours. A manager
+  /// asks again with `despiteWarnings: true`.
+  NeedsConfirmation,
+}
+
+/// What asking for a place came to: the result, a sentence a person can be shown, and the place when assigned.
+public class ShiftOutcome {
+  public ShiftResult Result;
+  public string Message = "";
+  public ShiftAssignment? Assignment;
+  public bool IsAssigned => Result == ShiftResult.Assigned;
+}
+
+/// Somebody was put on a shift (or claimed a place).
+[Event("Put on a shift")]
+public sealed class ShiftAssigned { public ShiftAssignment Assignment; }
+
+/// Somebody came off a shift — taken off, or gave the place up. The place is gone by the time this is heard, so it
+/// carries what it was: the shift, who, and which place.
+[Event("Taken off a shift")]
+public sealed class ShiftUnassigned {
+  public Shift Shift;
+  public Principal Worker;
+  public int Slot;
+  public Principal? By;
+}
+
+/// The hours a shift counts for: its length less its break.
+public decimal ShiftHours(Shift s) {
+  var minutes = (decimal)(s.EndsAt - s.StartsAt).TotalMinutes - s.BreakMinutes;
+  return minutes <= 0m ? 0m : Math.Round(minutes / 60m, 2);
+}
+
+/// How many places are still free on the shift (none once it is cancelled).
+public int OpenPlaces(Shift shift) {
+  if (shift.State == ShiftState.Cancelled) { return 0; }
+  var taken = ShiftAssignment.Count(a => a.Shift == shift);
+  return Math.Max(0, shift.Needed - taken);
+}
+
+/// Who is on the shift, by place.
+public List<ShiftAssignment> CrewOf(Shift shift) {
+  return ShiftAssignment.Include(a => a.Worker).Where(a => a.Shift == shift).OrderBy(a => a.Slot).Take(500).ToList();
+}
+
+/// Hours `worker` is on in the rota week (Monday on the rota's clock) holding `day`, leaving out `except`.
+public decimal WeekHoursOf(Principal worker, DateOnly day, Shift? except = null) {
+  var monday = RotaWeekOf(day);
+  var from = RotaDayStart(monday);
+  var to = RotaDayStart(monday.AddDays(7));
+  var exceptId = except == null ? Guid.Empty : except.Id;
+  var shifts = ShiftAssignment.Where(a => a.Worker == worker && a.Shift.State != ShiftState.Cancelled
+                                          && a.Shift.StartsAt >= from && a.Shift.StartsAt < to && a.Shift.Id != exceptId)
+                              .Select(a => a.Shift).Take(200).ToList();
+  var total = 0m;
+  foreach (var s in shifts) { total = total + ShiftHours(s); }
+  return total;
+}
+
+/// The hard reasons `worker` cannot be on `shift`, whoever asks — "" when there is none. `leaving` is a place the
+/// person gives up in the same move (a swap), so it neither clashes nor counts.
+string HardRefusal(Shift shift, Principal worker, ShiftAssignment? leaving) {
+  var who = worker.Id == CurrentPrincipal().Id ? "You are" : RotaName(worker) + " is";
+  if (shift.State == ShiftState.Cancelled) { return "This shift is cancelled."; }
+  if (shift.StartsAt <= DateTime.UtcNow) { return "This shift has already started."; }
+  if (ShiftAssignment.Any(a => a.Shift == shift && a.Worker == worker)) { return who + " already on this shift."; }
+  var leavingId = leaving == null ? Guid.Empty : leaving.Id;
+  var clash = ShiftAssignment.Where(a => a.Worker == worker && a.Id != leavingId && a.Shift.State != ShiftState.Cancelled
+                                         && a.Shift.StartsAt < shift.EndsAt && a.Shift.EndsAt > shift.StartsAt)
+                             .Select(a => a.Shift.Title).FirstOrDefault();
+  if (clash != null) { return who + " on " + clash + " then."; }
+  var shiftStarts = shift.StartsAt;
+  var shiftEnds = shift.EndsAt;
+  var off = TimeOffRequest.Where(r => r.Worker == worker && r.State == TimeOffState.Approved).Take(200).ToList()
+                          .Where(r => TimeOffStarts(r) < shiftEnds && TimeOffEnds(r) > shiftStarts).FirstOrDefault();
+  if (off != null) {
+    return who + " off " + (off.From == off.To ? "on " + off.From.ToString("d MMM") : "from " + off.From.ToString("d MMM") + " to " + off.To.ToString("d MMM")) + ".";
+  }
+  if (shift.Position != null) {
+    var position = shift.Position;
+    var checkers = App.Implementations<IShiftRequirements>();
+    foreach (var r in PositionRequirement.Where(r => r.Position == position).OrderBy(r => r.Key).Take(50).ToList()) {
+      var label = r.Label != "" ? r.Label : r.Key;
+      if (checkers.Count == 0) { return position.Name + " needs " + label + ", and nothing in this app can confirm it."; }
+      // Met when any answer confirms it (an app's own records, a qualifications kit); refused with the first one's reason.
+      string? first = null;
+      var met = false;
+      foreach (var c in checkers) {
+        var why = c.Unmet(worker, r.Key, shift.StartsAt);
+        if (why == null) { met = true; } else if (first == null) { first = why; }
+      }
+      if (!met) { return position.Name + " needs " + label + ": " + first; }
+    }
+  }
+  foreach (var rule in App.Implementations<IShiftRule>()) {
+    var why = rule.Refusal(shift, worker);
+    if (why != null) { return why; }
+  }
+  return "";
+}
+
+/// What a manager may go past knowingly — "" when nothing: a weekly unavailability, the week's hours cap.
+string Warning(Shift shift, Principal worker, ShiftAssignment? leaving) {
+  var who = worker.Id == CurrentPrincipal().Id ? "You are" : RotaName(worker) + " is";
+  foreach (var u in Unavailability.Where(u => u.Worker == worker).Take(50).ToList()) {
+    if (UnavailableDuring(u, shift.StartsAt, shift.EndsAt)) { return who + " not free " + UnavailabilityText(u) + "."; }
+  }
+  var cap = App.Setting<ShiftSchedulingSetup>().MaxHoursPerWeek;
+  if (cap > 0m) {
+    var week = WeekHoursOf(worker, DateOnly.FromDateTime(RotaLocal(shift.StartsAt)), leaving == null ? null : leaving.Shift);
+    if (week + ShiftHours(shift) > cap) {
+      return $"That makes {week + ShiftHours(shift):0.##} hours that week, over the {cap:0.##} allowed.";
+    }
+  }
+  return "";
+}
+
+/// Why `worker` may not be on `shift` now — "" when they may. Every way onto a shift asks this: cancelled, started,
+/// already on it, full, on another shift then, off that day, a position's requirement unmet, the app's own rules; and,
+/// for a place they take themselves, the hours they said they are not free and the week's hours cap.
+public string WhyNotOnShift(Shift shift, Principal worker) {
+  var hard = HardRefusal(shift, worker, null);
+  if (hard != "") { return hard; }
+  if (OpenPlaces(shift) == 0) { return "This shift is full."; }
+  return Warning(shift, worker, null);
+}
+
+/// The lowest free place on the shift, or 0 when it is full.
+int FirstFreePlace(Shift shift) {
+  var taken = ShiftAssignment.Where(a => a.Shift == shift).Select(a => a.Slot).Take(shift.Needed + 1).ToList();
+  var place = 1;
+  while (taken.Contains(place)) { place = place + 1; }
+  return place > shift.Needed ? 0 : place;
+}
+
+ShiftOutcome Refused(string why) { return new ShiftOutcome { Result = ShiftResult.Refused, Message = why }; }
+
+ShiftOutcome Placed(ShiftAssignment a) {
+  Raise(new ShiftAssigned { Assignment = a });
+  UnitOfWork.Commit();
+  var shift = a.Shift;
+  return new ShiftOutcome { Result = ShiftResult.Assigned, Assignment = a,
+                            Message = a.Worker.Id == CurrentPrincipal().Id ? "You are on " + shift.Title + "." : RotaName(a.Worker) + " is on " + shift.Title + "." };
+}
+
+/// Put `worker` on `shift` — a draft or a published one — in its lowest free place. Refused, with the reason, for what
+/// nobody may go past; answers `NeedsConfirmation` for what a manager may (they said they are not free then, the week's
+/// hours) until asked again with `despiteWarnings: true`. Never throws for a refusal.
+[Server, Authorize(ManagesShifts)]
+public ShiftOutcome AssignShift(Shift shift, Principal worker, bool despiteWarnings = false) {
+  var hard = HardRefusal(shift, worker, null);
+  if (hard != "") { return Refused(hard); }
+  if (OpenPlaces(shift) == 0) { return Refused("This shift is full."); }
+  if (!despiteWarnings) {
+    var warning = Warning(shift, worker, null);
+    if (warning != "") { return new ShiftOutcome { Result = ShiftResult.NeedsConfirmation, Message = warning }; }
+  }
+  var slot = FirstFreePlace(shift);
+  if (slot == 0) { return Refused("This shift is full."); }
+  // Made here, in the function the deny names — a helper would not be let past it.
+  return Placed(new ShiftAssignment { Shift = shift, Worker = worker, Slot = slot, AssignedBy = CurrentPrincipal() });
+}
+
+/// Claim an open place on a published shift for yourself — where the app lets workers claim. Refused, with the reason,
+/// for anything `WhyNotOnShift` says. Never throws for a refusal.
+[Server, Authorize(WorksShifts)]
+public ShiftOutcome ClaimShift(Shift shift) {
+  if (!App.Setting<ShiftSchedulingSetup>().WorkersClaimOpenShifts) { return Refused("Shifts are given out by whoever runs the rota."); }
+  if (shift.State == ShiftState.Draft) { return Refused("This shift is not on the rota yet."); }
+  var me = CurrentPrincipal();
+  var why = WhyNotOnShift(shift, me);
+  if (why != "") { return Refused(why); }
+  var slot = FirstFreePlace(shift);
+  if (slot == 0) { return Refused("This shift is full."); }
+  return Placed(new ShiftAssignment { Shift = shift, Worker = me, Slot = slot, AssignedBy = me });
+}
+
+void Removed(Shift shift, Principal worker, int slot) {
+  Raise(new ShiftUnassigned { Shift = shift, Worker = worker, Slot = slot, By = CurrentPrincipal() });
+  UnitOfWork.Commit();
+}
+
+/// Take somebody off a shift. Their place is free again and their reminder is stopped.
+[Server, Authorize(ManagesShifts)]
+public void Unassign(ShiftAssignment assignment) {
+  var shift = assignment.Shift;
+  var worker = assignment.Worker;
+  var slot = assignment.Slot;
+  ShiftReminder.RaiseStop(assignment);
+  foreach (var c in ShiftCoverRequest.Where(c => c.Assignment == assignment || c.InExchangeFor == assignment).Take(50).ToList()) { c.Delete(); }
+  assignment.Delete();
+  Removed(shift, worker, slot);
+}
+
+/// Give up your own place — where the app lets workers drop a shift, and no later than its cut-off before the start.
+/// Otherwise ask for cover (`RequestCover`).
+[Server, Authorize(IsAuthenticated)]
+public void DropShift(ShiftAssignment assignment) {
+  if (assignment.Worker.Id != CurrentPrincipal().Id) { throw new NotAuthorized("Only the person on it can give this place up."); }
+  var setup = App.Setting<ShiftSchedulingSetup>();
+  if (!setup.WorkersMayDrop) { throw new ValidationException("Ask for cover instead — somebody takes the shift, and you are off it."); }
+  if (assignment.Shift.StartsAt - DateTime.UtcNow < setup.DropCutoff) {
+    throw new ValidationException("It is too close to the start to drop this shift — ask for cover instead.");
+  }
+  var shift = assignment.Shift;
+  var slot = assignment.Slot;
+  ShiftReminder.RaiseStop(assignment);
+  foreach (var c in ShiftCoverRequest.Where(c => c.Assignment == assignment || c.InExchangeFor == assignment).Take(50).ToList()) { c.Delete(); }
+  assignment.Delete();
+  Removed(shift, CurrentPrincipal(), slot);
+}
+
+/// A person's name as the rota writes it.
+public string RotaName(Principal p) { return p.DisplayName != null && p.DisplayName != "" ? p.DisplayName : p.Email; }

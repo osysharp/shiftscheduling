@@ -1,0 +1,205 @@
+// Cover and swaps. A person who cannot work a shift asks for cover — from anybody who may take it, or from one named
+// colleague — or offers a swap for a colleague's shift. Somebody takes it; where the app says so a manager approves; then
+// the place changes hands. Every step is asked of the same check as any other way onto a shift.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// Where a request for cover stands. ⚠ Appended, never inserted.
+public enum CoverState {
+  /// Waiting for somebody to take it.
+  [Label("Open")] Open,
+  /// Taken, waiting for a manager's approval.
+  [Label("Waiting for approval")] Taken,
+  /// The place changed hands.
+  [Label("Covered")] Covered,
+  [Label("Declined")] Declined,
+  [Label("Withdrawn")] Withdrawn,
+}
+
+/// A request to hand a place to somebody else — or, with `InExchangeFor`, to swap it for theirs.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity ShiftCoverRequest {
+  [Required, Immutable] ShiftAssignment Assignment;
+  /// Who asked — the person on the shift when they asked.
+  [Required, Immutable] Principal From;
+  /// One colleague it is offered to; anybody who may take the shift when empty.
+  [Immutable] Principal? OfferedTo;
+  /// A swap: the colleague's own place the asker takes in return.
+  [Immutable] ShiftAssignment? InExchangeFor;
+  [Immutable, MaxLength(300), Classification(Personal.Content)] string Reason = "";
+  [Immutable] DateTime At = DateTime.UtcNow;
+  CoverState State = CoverState.Open;
+  Principal? TakenBy;
+  DateTime? TakenAt;
+  Principal? DecidedBy;
+  DateTime? DecidedAt;
+  [MaxLength(300), Classification(Personal.Content)] string DecisionNote = "";
+
+  security {
+    allow read when ManagesShifts;
+    allow read when WorksShifts where OfferedTo == null || OfferedTo == user || From == user;
+    allow create, update, delete when IsAuthenticated;
+    deny create except via RequestCover, RequestSwap;
+    deny update State except via AcceptCover, DecideCover, WithdrawCover;
+    deny update TakenBy, TakenAt except via AcceptCover;
+    deny update DecidedBy except via DecideCover, EraseRotaDataOf;
+    deny update DecidedAt, DecisionNote except via DecideCover;
+    deny delete except via Unassign, DropShift, EraseRotaDataOf;
+  }
+}
+
+/// Somebody asked for cover or offered a swap — `OfferedTo` names whom, or nobody for anybody.
+[Event("Cover requested")]
+public sealed class CoverRequested { public ShiftCoverRequest Request; }
+
+/// Somebody took a request, and it waits for a manager's approval.
+[Event("Cover taken")]
+public sealed class CoverTaken { public ShiftCoverRequest Request; }
+
+/// A place changed hands: `Request.TakenBy` is on the shift now (and, for a swap, `Request.From` on theirs).
+[Event("Shift covered")]
+public sealed class ShiftCovered { public ShiftCoverRequest Request; }
+
+/// A manager declined a taken request; the place stays where it was.
+[Event("Cover declined")]
+public sealed class CoverDeclined { public ShiftCoverRequest Request; }
+
+void OwnPlace(ShiftAssignment a) {
+  if (a.Worker.Id != CurrentPrincipal().Id) { throw new NotAuthorized("Only the person on the shift can ask for cover."); }
+  if (a.Shift.State != ShiftState.Published) { throw new ValidationException("That shift is not on the rota."); }
+  if (a.Shift.StartsAt <= DateTime.UtcNow) { throw new ValidationException("That shift has already started."); }
+  if (ShiftCoverRequest.Any(c => c.Assignment == a && (c.State == CoverState.Open || c.State == CoverState.Taken))) {
+    throw new ValidationException("You have already asked for cover for this shift.");
+  }
+}
+
+/// Ask for somebody to take your place — anybody who may, or `to`, one colleague.
+[Server, Authorize(WorksShifts)]
+public ShiftCoverRequest RequestCover(ShiftAssignment assignment, string reason = "", Principal? to = null) {
+  OwnPlace(assignment);
+  if (to != null && to.Id == CurrentPrincipal().Id) { throw new ValidationException("Offer it to somebody else."); }
+  var request = new ShiftCoverRequest { Assignment = assignment, From = CurrentPrincipal(), OfferedTo = to, Reason = reason.Trim() };
+  Raise(new CoverRequested { Request = request });
+  UnitOfWork.Commit();
+  return request;
+}
+
+/// Offer your place in exchange for a colleague's — `theirs`, a place they hold on another shift.
+[Server, Authorize(WorksShifts)]
+public ShiftCoverRequest RequestSwap(ShiftAssignment assignment, ShiftAssignment theirs, string reason = "") {
+  OwnPlace(assignment);
+  if (theirs.Worker.Id == CurrentPrincipal().Id) { throw new ValidationException("That place is already yours."); }
+  if (theirs.Shift.State != ShiftState.Published || theirs.Shift.StartsAt <= DateTime.UtcNow) {
+    throw new ValidationException("Their shift must be on the rota and still to come.");
+  }
+  var request = new ShiftCoverRequest { Assignment = assignment, From = CurrentPrincipal(), OfferedTo = theirs.Worker,
+                                        InExchangeFor = theirs, Reason = reason.Trim() };
+  Raise(new CoverRequested { Request = request });
+  UnitOfWork.Commit();
+  return request;
+}
+
+/// Why `taker` may not take `request` now — "" when they may. Asked when it is taken and again when it is approved.
+public string WhyNotCover(ShiftCoverRequest request, Principal taker) {
+  if (request.State != CoverState.Open && request.State != CoverState.Taken) { return "That request is closed."; }
+  if (request.OfferedTo != null && request.OfferedTo.Id != taker.Id) { return "That request is for somebody else."; }
+  if (taker.Id == request.From.Id) { return "That is your own request."; }
+  var a = request.Assignment;
+  if (a.Worker.Id != request.From.Id) { return "That place has changed hands already."; }
+  // The taker leaves their own place in a swap, so it neither clashes nor counts against them.
+  var why = HardRefusal(a.Shift, taker, request.InExchangeFor);
+  if (why != "") { return why; }
+  if (request.InExchangeFor != null) {
+    var theirs = request.InExchangeFor!;
+    if (theirs.Worker.Id != taker.Id) { return "Their place has changed hands already."; }
+    var back = HardRefusal(theirs.Shift, request.From, a);
+    if (back != "") { return RotaName(request.From) + " cannot take yours: " + back; }
+  }
+  return "";
+}
+
+/// What follows a place changing hands: a reminder already sent goes again to whoever has it now, and the app is told.
+void Covered(ShiftCoverRequest request, bool remindTaker, bool remindAsker) {
+  if (remindTaker) { Raise(new ShiftReminderDue { Assignment = request.Assignment }); }
+  if (remindAsker && request.InExchangeFor != null) { Raise(new ShiftReminderDue { Assignment = request.InExchangeFor! }); }
+  Raise(new ShiftCovered { Request = request });
+}
+
+/// Take a request: the place is yours at once, or — where the app wants a manager's say — once they approve.
+[Server, Authorize(WorksShifts)]
+public ShiftCoverRequest AcceptCover(ShiftCoverRequest request) {
+  var me = CurrentPrincipal();
+  if (request.State != CoverState.Open) { throw new ValidationException("Somebody has already taken that."); }
+  var why = WhyNotCover(request, me);
+  if (why != "") { throw new ValidationException(why); }
+  request.TakenBy = me;
+  request.TakenAt = DateTime.UtcNow;
+  if (App.Setting<ShiftSchedulingSetup>().CoverNeedsApproval) {
+    request.State = CoverState.Taken;
+    Raise(new CoverTaken { Request = request });
+  } else {
+    // The place changes hands here, in the function the deny names — a helper would not be let past it.
+    var remindTaker = request.Assignment.Reminder == ReminderState.Sent;
+    var remindAsker = request.InExchangeFor != null && request.InExchangeFor!.Reminder == ReminderState.Sent;
+    request.Assignment.Worker = me;
+    if (request.InExchangeFor != null) { request.InExchangeFor!.Worker = request.From; }
+    request.State = CoverState.Covered;
+    Covered(request, remindTaker, remindAsker);
+  }
+  UnitOfWork.Commit();
+  return request;
+}
+
+/// Approve or decline a taken request. Approving checks again — times change — and refuses with the reason.
+[Server, Authorize(ManagesShifts)]
+public void DecideCover(ShiftCoverRequest request, bool approve, string note = "") {
+  if (request.State != CoverState.Taken) { throw new ValidationException("That request is not waiting for approval."); }
+  request.DecidedBy = CurrentPrincipal();
+  request.DecidedAt = DateTime.UtcNow;
+  request.DecisionNote = note.Trim();
+  if (!approve) {
+    request.State = CoverState.Declined;
+    Raise(new CoverDeclined { Request = request });
+    UnitOfWork.Commit();
+    return;
+  }
+  var why = WhyNotCover(request, request.TakenBy!);
+  if (why != "") { throw new ValidationException(why); }
+  var remindTaker = request.Assignment.Reminder == ReminderState.Sent;
+  var remindAsker = request.InExchangeFor != null && request.InExchangeFor!.Reminder == ReminderState.Sent;
+  request.Assignment.Worker = request.TakenBy!;
+  if (request.InExchangeFor != null) { request.InExchangeFor!.Worker = request.From; }
+  request.State = CoverState.Covered;
+  Covered(request, remindTaker, remindAsker);
+  UnitOfWork.Commit();
+}
+
+/// Take your request back while nobody has it — or, as a manager, any request not yet covered.
+[Server, Authorize(IsAuthenticated)]
+public void WithdrawCover(ShiftCoverRequest request) {
+  if (request.From.Id != CurrentPrincipal().Id && !ManagesShifts) { throw new NotAuthorized("Only the person who asked can take it back."); }
+  if (request.State != CoverState.Open && request.State != CoverState.Taken) { return; }
+  if (request.State == CoverState.Taken && !ManagesShifts) { throw new ValidationException("Somebody has taken it — ask whoever runs the rota."); }
+  request.State = CoverState.Withdrawn;
+  UnitOfWork.Commit();
+}
+
+/// Requests `worker` could take now: offered to anybody or to them, still to come, not their own — soonest first.
+public List<ShiftCoverRequest> CoverOffersFor(Principal worker, int take = 30) {
+  var now = DateTime.UtcNow;
+  var open = ShiftCoverRequest.Include(c => c.Assignment.Shift).Include(c => c.From)
+    .Where(c => c.State == CoverState.Open && c.From != worker && c.Assignment.Shift.StartsAt > now
+                && (c.OfferedTo == null || c.OfferedTo == worker))
+    .OrderBy(c => c.Assignment.Shift.StartsAt).Take(100).ToList();
+  return open.Where(c => WhyNotCover(c, worker) == "").Take(take).ToList();
+}
+
+/// Requests waiting for a manager: cover taken, waiting for approval — soonest shift first.
+[Server, Authorize(ManagesShifts)]
+public List<ShiftCoverRequest> CoverAwaitingApproval(int take = 100) {
+  return ShiftCoverRequest.Include(c => c.Assignment.Shift).Include(c => c.From).Include(c => c.TakenBy)
+    .Where(c => c.State == CoverState.Taken).OrderBy(c => c.Assignment.Shift.StartsAt).Take(take).ToList();
+}

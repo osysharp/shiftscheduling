@@ -1,0 +1,220 @@
+// What the pages read — shaped once here, so each page is drawing and nothing else.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+
+/// A shift as a page shows it.
+public class ShiftCard {
+  public Guid Id;
+  public string Title = "";
+  public string Position = "";
+  /// "Mon 12 Oct · 09:00–17:00", on the rota's clock.
+  public string When = "";
+  public string Times = "";
+  public DateOnly Day;
+  public string Location = "";
+  public string Note = "";
+  public int Needed;
+  public int Filled;
+  public decimal Hours;
+  public bool Draft;
+  public bool Cancelled;
+  public bool Started;
+  public List<string> Crew = [];
+}
+
+/// A place a person holds, as their page shows it.
+public class PlaceCard {
+  public Guid Id;
+  public ShiftCard Shift = new ShiftCard();
+  /// A request for cover on it that is still open or waiting, in words — "" when none.
+  public string Cover = "";
+  public Guid CoverId;
+  public bool CanDrop;
+}
+
+/// A request for cover, as a page lists it.
+public class CoverLine {
+  public Guid Id;
+  public ShiftCard Shift = new ShiftCard();
+  public string From = "";
+  public string TakenBy = "";
+  public string Reason = "";
+  public bool Swap;
+  public string SwapFor = "";
+}
+
+/// A request for time off, as a page lists it.
+public class TimeOffLine {
+  public Guid Id;
+  public string Worker = "";
+  public string Days = "";
+  public string Reason = "";
+  public string State = "";
+  public bool Waiting;
+  public bool CanWithdraw;
+}
+
+/// Somebody a manager may put on a shift.
+public class RotaPerson {
+  public Guid Id;
+  public string Name = "";
+  public string Email = "";
+}
+
+/// The signed-in person's rota.
+public class MyRota {
+  public decimal WeekHours;
+  public string Next = "";
+  public List<PlaceCard> Places = [];
+  public List<ShiftCard> Open = [];
+  public List<CoverLine> Offers = [];
+  public List<TimeOffLine> TimeOff = [];
+  public List<Unavailability> NotFree = [];
+}
+
+/// One day of the manager's week.
+public class RotaDay {
+  public DateOnly Day;
+  public string Label = "";
+  public List<ShiftCard> Shifts = [];
+}
+
+/// The manager's week.
+public class RotaWeekView {
+  public DateOnly Monday;
+  public string Title = "";
+  public int Drafts;
+  public int OpenPlaces;
+  public decimal Hours;
+  public List<RotaDay> Days = [];
+  public List<WorkerHours> People = [];
+}
+
+/// "09:00–17:00" — and the day after, when it runs past midnight.
+public string ShiftTimes(Shift s) {
+  var a = RotaLocal(s.StartsAt);
+  var b = RotaLocal(s.EndsAt);
+  return a.ToString("HH:mm") + "–" + b.ToString("HH:mm") + (DateOnly.FromDateTime(b) != DateOnly.FromDateTime(a) ? " (+1)" : "");
+}
+
+/// A shift as the pages show it.
+public ShiftCard ShiftCardOf(Shift s) {
+  var crew = CrewOf(s);
+  var local = RotaLocal(s.StartsAt);
+  return new ShiftCard {
+    Id = s.Id, Title = s.Title, Position = s.Position == null ? "" : s.Position.Name,
+    When = local.ToString("ddd d MMM") + " · " + ShiftTimes(s), Times = ShiftTimes(s), Day = DateOnly.FromDateTime(local),
+    Location = s.Location, Note = s.Note, Needed = s.Needed, Filled = crew.Count, Hours = ShiftHours(s),
+    Draft = s.State == ShiftState.Draft, Cancelled = s.State == ShiftState.Cancelled, Started = s.StartsAt <= DateTime.UtcNow,
+    Crew = crew.Select(a => RotaName(a.Worker)).ToList(),
+  };
+}
+
+/// "12 Oct", or "12–14 Oct".
+public string DaysText(DateOnly from, DateOnly to) {
+  if (from == to) { return from.ToString("d MMM yyyy"); }
+  return from.ToString("d MMM") + " – " + to.ToString("d MMM yyyy");
+}
+
+TimeOffLine TimeOffLineOf(TimeOffRequest r) {
+  return new TimeOffLine {
+    Id = r.Id, Worker = RotaName(r.Worker), Days = DaysText(r.From, r.To), Reason = r.Reason, State = r.State.Label,
+    Waiting = r.State == TimeOffState.Pending,
+    CanWithdraw = r.State == TimeOffState.Pending || (r.State == TimeOffState.Approved && r.From > RotaToday()),
+  };
+}
+
+CoverLine CoverLineOf(ShiftCoverRequest c) {
+  return new CoverLine {
+    Id = c.Id, Shift = ShiftCardOf(c.Assignment.Shift), From = RotaName(c.From),
+    TakenBy = c.TakenBy == null ? "" : RotaName(c.TakenBy!), Reason = c.Reason, Swap = c.InExchangeFor != null,
+    SwapFor = c.InExchangeFor == null ? "" : c.InExchangeFor!.Shift.Title + " · " + RotaLocal(c.InExchangeFor!.Shift.StartsAt).ToString("ddd d MMM HH:mm"),
+  };
+}
+
+/// The signed-in person's rota: their shifts, the open ones and the cover they could take, their time off. One round
+/// trip: it is read on the server.
+[Server, Authorize(SeesShifts)]
+public MyRota MyRotaView() {
+  var me = CurrentPrincipal();
+  var view = new MyRota();
+  if (me == null) { return view; }
+  var setup = App.Setting<ShiftSchedulingSetup>();
+  var now = DateTime.UtcNow;
+  view.WeekHours = WeekHoursOf(me!, RotaToday());
+  foreach (var a in ShiftsOf(me!, 30).Where(a => a.Shift.EndsAt > now && a.Shift.State != ShiftState.Cancelled).ToList()) {
+    var aid = a.Id;
+    var cover = ShiftCoverRequest.Where(c => c.Assignment.Id == aid && (c.State == CoverState.Open || c.State == CoverState.Taken)).FirstOrDefault();
+    view.Places.Add(new PlaceCard {
+      Id = a.Id, Shift = ShiftCardOf(a.Shift),
+      Cover = cover == null ? "" : cover.State == CoverState.Taken ? RotaName(cover.TakenBy!) + " is taking it — waiting for approval"
+            : cover.OfferedTo != null ? (cover.InExchangeFor != null ? "Swap offered to " : "Offered to ") + RotaName(cover.OfferedTo!)
+            : "Asking for cover",
+      CoverId = cover == null ? Guid.Empty : cover.Id,
+      CanDrop = setup.WorkersMayDrop && a.Shift.StartsAt - now >= setup.DropCutoff,
+    });
+  }
+  if (view.Places.Count > 0) { view.Next = view.Places[0].Shift.Day.ToString("ddd d MMM") + " " + view.Places[0].Shift.Times.Substring(0, 5); }
+  if (setup.WorkersClaimOpenShifts && WorksShifts) { view.Open = OpenShiftsFor(me!, 12).Select(s => ShiftCardOf(s)).ToList(); }
+  if (WorksShifts) { view.Offers = CoverOffersFor(me!, 12).Select(c => CoverLineOf(c)).ToList(); }
+  var recent = RotaToday().AddDays(-30);
+  view.TimeOff = TimeOffRequest.Where(r => r.Worker == me && r.To >= recent)
+                               .OrderByDescending(r => r.From).Take(20).ToList().Select(r => TimeOffLineOf(r)).ToList();
+  view.NotFree = Unavailability.Where(u => u.Worker == me).Take(30).ToList();
+  return view;
+}
+
+/// The week starting on the Monday of `day` (this week when null): each day's shifts, the drafts and open places, and
+/// everybody's hours.
+[Server, Authorize(ManagesShifts)]
+public RotaWeekView RotaWeekOfDay(DateOnly? day = null) {
+  var monday = RotaWeekOf(day ?? RotaToday());
+  var from = RotaDayStart(monday);
+  var to = RotaDayStart(monday.AddDays(7));
+  var shifts = Shift.Include(s => s.Position).Where(s => s.StartsAt >= from && s.StartsAt < to).OrderBy(s => s.StartsAt).Take(500).ToList();
+  var view = new RotaWeekView { Monday = monday, Title = "Week of " + monday.ToString("d MMMM yyyy") };
+  for (var i = 0; i < 7; i++) {
+    var d = monday.AddDays(i);
+    view.Days.Add(new RotaDay { Day = d, Label = d.ToString("ddd d MMM") });
+  }
+  foreach (var s in shifts) {
+    var card = ShiftCardOf(s);
+    var slot = view.Days.FirstOrDefault(x => x.Day == card.Day);
+    if (slot != null) { slot.Shifts.Add(card); }
+    if (card.Draft) { view.Drafts = view.Drafts + 1; }
+    if (!card.Cancelled) { view.OpenPlaces = view.OpenPlaces + Math.Max(0, card.Needed - card.Filled); }
+  }
+  view.People = HoursBetween(from, to);
+  foreach (var p in view.People) { view.Hours = view.Hours + p.Hours; }
+  return view;
+}
+
+/// People whose name or address holds `search` — for a manager to put on a shift (at most 20).
+[Server, Authorize(ManagesShifts)]
+public List<RotaPerson> FindRotaPeople(string search) {
+  var q = search.Trim();
+  if (q.Length < 2) { return []; }
+  return Principal.Where(p => p.DisplayName.Contains(q) || p.Email.Contains(q)).OrderBy(p => p.DisplayName).Take(20).ToList()
+    .Select(p => new RotaPerson { Id = p.Id, Name = RotaName(p), Email = p.Email }).ToList();
+}
+
+/// Time off waiting for an answer, soonest first.
+[Server, Authorize(ManagesShifts)]
+public List<TimeOffLine> TimeOffWaiting() {
+  return TimeOffRequest.Include(r => r.Worker).Where(r => r.State == TimeOffState.Pending).OrderBy(r => r.From).Take(100).ToList()
+    .Select(r => TimeOffLineOf(r)).ToList();
+}
+
+/// Time off approved from today on, soonest first — who is away.
+[Server, Authorize(ManagesShifts)]
+public List<TimeOffLine> TimeOffAhead() {
+  var today = RotaToday();
+  return TimeOffRequest.Include(r => r.Worker).Where(r => r.State == TimeOffState.Approved && r.To >= today).OrderBy(r => r.From).Take(100).ToList()
+    .Select(r => TimeOffLineOf(r)).ToList();
+}
+
+/// Cover taken and waiting for approval, as the requests page lists it.
+[Server, Authorize(ManagesShifts)]
+public List<CoverLine> CoverWaiting() { return CoverAwaitingApproval(100).Select(c => CoverLineOf(c)).ToList(); }

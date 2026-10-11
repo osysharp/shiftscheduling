@@ -1,0 +1,63 @@
+// The reminder before a shift, one run per place: it waits until the lead before the shift starts, then says so once.
+// It sleeps while the shift is a draft, re-sets itself when the shift is published or moved, and stops when the place is
+// given up or the shift cancelled. The kit never decides HOW somebody is told — it raises `ShiftReminderDue`.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Workflow;
+
+/// A shift's reminder fell due: the app tells the person on it (`Assignment.Worker`). Raised once a place — and again
+/// for whoever takes a place over after its reminder went out.
+[Event("Shift reminder due")]
+public sealed class ShiftReminderDue { public ShiftAssignment Assignment; }
+
+/// When this place's reminder falls due: the shift's start less the lead.
+public DateTime ReminderDueAt(ShiftAssignment a) { return a.Shift.StartsAt - App.Setting<ShiftSchedulingSetup>().ReminderLead; }
+
+/// How long until then, never negative. A draft's reminder, or one with no lead set, waits until it is woken.
+public TimeSpan ReminderWait(ShiftAssignment a) {
+  if (a.Shift.State != ShiftState.Published || App.Setting<ShiftSchedulingSetup>().ReminderLead <= TimeSpan.Zero) { return TimeSpan.FromDays(3650); }
+  var wait = ReminderDueAt(a) - DateTime.UtcNow;
+  return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+}
+
+/// Is the place's reminder due now: published, not started, and inside the lead.
+bool ReminderIsDue(ShiftAssignment a) {
+  return a.Shift.State == ShiftState.Published && App.Setting<ShiftSchedulingSetup>().ReminderLead > TimeSpan.Zero
+      && a.Shift.StartsAt > DateTime.UtcNow && ReminderWait(a) == TimeSpan.Zero;
+}
+
+/// Say it: stamp the place and tell whoever listens. Called by the reminder's own run, nowhere else.
+void FireReminder(ShiftAssignment a) {
+  a.RemindedAt = DateTime.UtcNow;
+  Raise(new ShiftReminderDue { Assignment = a });
+}
+
+public workflow ShiftReminder {
+  Tracks    = ShiftAssignment.Reminder;
+  Autostart = true;
+  Initial   = Waiting;
+
+  /// The shift was published or moved — the clock is set again.
+  event Rearm();
+  /// The place was given up, or the shift cancelled.
+  event Stop();
+
+  state Waiting {
+    // A place taken inside the lead is reminded in the very commit that makes it.
+    enter {
+      if (ReminderIsDue(this.Item)) { FireReminder(this.Item); goto Sent; }
+    }
+    Expire { Within = ReminderWait(this.Item); Accrues = false; }
+    on Expire {
+      when (this.Item.Shift.State == ShiftState.Cancelled || this.Item.Shift.StartsAt <= DateTime.UtcNow) { goto Stopped; }
+      when (ReminderIsDue(this.Item)) { FireReminder(this.Item); goto Sent; }
+      default { goto Waiting; }
+    }
+    on Rearm { goto Waiting; }
+    on Stop { goto Stopped; }
+  }
+
+  terminal success Sent { }
+  terminal cancel  Stopped { }
+}

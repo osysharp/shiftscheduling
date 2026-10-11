@@ -1,0 +1,85 @@
+// Cover and swaps: asked for, taken, approved or declined — and the place changes hands only when it may.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Test(Cafe)]
+[runas(Ada)]
+void cover_is_taken_by_a_colleague_and_the_lead_approves_it() {
+  var mine = OnShift(Ada, "Opening");
+  var request = RequestCover(mine, "Sick child");
+  runas(Bo) {
+    Assert.Equal(1, CoverOffersFor(Bo).Count);
+    var taken = AcceptCover(request);
+    Assert.Equal(CoverState.Taken, taken.State);
+  }
+  Assert.Equal(Ada.Id, ShiftAssignment.Single(a => a.Id == mine.Id).Worker.Id);
+  runas(Dana) {
+    Assert.Equal(1, CoverAwaitingApproval().Count);
+    DecideCover(request, true);
+    var now = ShiftAssignment.Single(a => a.Id == mine.Id);
+    Assert.Equal(Bo.Id, now.Worker.Id);
+    Assert.Equal(1, now.Slot);
+  }
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "covered" && h.Detail == "Opening:Bo Lindqvist"));
+  Assert.Equal(1, HeardCount("covertaken"));
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void cover_offered_to_one_colleague_is_theirs_alone_to_take() {
+  var request = RequestCover(OnShift(Ada, "Opening"), "", Cy);
+  runas(Bo) {
+    Assert.Equal(0, CoverOffersFor(Bo).Count);
+    Assert.Equal(0, ShiftCoverRequest.Count());
+  }
+  runas(Cy) { Assert.Equal(CoverState.Taken, AcceptCover(request).State); }
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_colleague_who_may_not_work_the_shift_cannot_take_it() {
+  var request = RequestCover(OnShift(Ada, "Espresso"), "Appointment");
+  runas(Bo) {
+    Assert.Equal(0, CoverOffersFor(Bo).Count);
+    Assert.Equal("Espresso bar needs Espresso training: no record of the course.",
+                 Assert.Throws<ValidationException>(() => AcceptCover(request)).Message);
+  }
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_swap_trades_two_places_once_approved() {
+  var mine = OnShift(Ada, "Opening");
+  var theirs = OnShift(Bo, "Closing");
+  var swap = RequestSwap(mine, theirs, "Swap mornings for evenings");
+  runas(Bo) { AcceptCover(swap); }
+  runas(Dana) { DecideCover(swap, true); }
+  Assert.Equal(Bo.Id, ShiftAssignment.Single(a => a.Id == mine.Id).Worker.Id);
+  Assert.Equal(Ada.Id, ShiftAssignment.Single(a => a.Id == theirs.Id).Worker.Id);
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_declined_request_leaves_the_place_where_it_was() {
+  var mine = OnShift(Ada, "Opening");
+  var request = RequestCover(mine);
+  runas(Cy) { AcceptCover(request); }
+  runas(Dana) { DecideCover(request, false, "Cy cannot open yet"); }
+  Assert.Equal(Ada.Id, ShiftAssignment.Single(a => a.Id == mine.Id).Worker.Id);
+  Assert.Equal(CoverState.Declined, ShiftCoverRequest.Single(c => c.Id == request.Id).State);
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void only_the_person_on_a_shift_asks_for_its_cover() {
+  var adas = OnShift(Ada, "Opening");
+  Assert.Throws<NotAuthorized>(() => RequestCover(adas));
+  var request = RequestCover(OnShift(Bo, "Closing"));
+  Assert.Equal("You have already asked for cover for this shift.",
+               Assert.Throws<ValidationException>(() => RequestCover(ShiftAssignment.Single(a => a.Worker == Bo))).Message);
+  WithdrawCover(request);
+  Assert.Equal(CoverState.Withdrawn, ShiftCoverRequest.Single(c => c.Id == request.Id).State);
+}

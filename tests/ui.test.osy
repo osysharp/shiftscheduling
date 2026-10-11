@@ -1,0 +1,146 @@
+// The kit's pages, driven as each person drives them. `osy test --pixels` photographs each (Ui.Shot) — the README's
+// screenshots are these.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+/// The café's week underway: Ada on the opening and the espresso bar, Bo on the closing, a pastry prep with a free place.
+[TestFixture]
+void WeekUnderway() {
+  Cafe();
+  var floor = ShiftPosition.Single(p => p.Name == "Floor");
+  new Shift { Title = "Pastry prep", Position = floor, StartsAt = At(2, 6), EndsAt = At(2, 9), State = ShiftState.Published };
+  new Shift { Title = "Lunch rush", Position = floor, StartsAt = At(3, 11), EndsAt = At(3, 15), Needed = 3, State = ShiftState.Published };
+}
+
+[Test(WeekUnderway)]
+[runas(Dana)]
+void a_barista_sees_their_shifts_claims_an_open_one_and_asks_for_cover() {
+  OnShift(Ada, "Opening");
+  OnShift(Ada, "Espresso");
+  OnShift(Bo, "Pastry prep");
+  runas(Bo) { RequestCover(ShiftAssignment.Single(a => a.Worker == Bo), "Exam that morning"); }
+  runas(Ada) { RequestTimeOff(new DateOnly(2026, 11, 23), new DateOnly(2026, 11, 27), "Family visit"); }
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Ada);
+  Ui.Visit("/shifts");
+  Assert.Visible("Opening", within: "Coming up");
+  Assert.Visible("Espresso", within: "Coming up");
+  Assert.Visible("Bo Lindqvist asks for cover: Exam that morning", within: "Cover you could take");
+  Ui.Click("Claim", within: "Lunch rush Thu 5 Nov · 11:00–15:00");
+  Assert.Visible("You are on Lunch rush.");
+  Assert.Visible("Lunch rush", within: "Coming up");
+  Ui.Shot("rota-my-shifts");
+  Ui.Click("Ask for cover", within: "Espresso Tue 3 Nov · 12:00–17:00");
+  Assert.Dialog("Ask for cover for Espresso");
+  Ui.Fill("Why (optional)", "Dentist");
+  Ui.Click("Ask for cover");
+  Assert.Visible("You asked for cover for Espresso.");
+  Assert.Visible("Asking for cover", within: "Espresso Tue 3 Nov · 12:00–17:00");
+}
+
+[Test(WeekUnderway)]
+void a_barista_asks_for_time_off_and_says_when_they_are_never_free() {
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Bo);
+  Ui.Visit("/shifts");
+  Ui.Click("Ask for time off");
+  Assert.Dialog("Ask for time off");
+  Ui.Fill("First day", "2026-11-12");
+  Ui.Fill("Last day", "2026-11-13");
+  Ui.Fill("Why (optional)", "Choir tour");
+  Ui.Click("Send request");
+  Assert.Visible("You asked for time off.");
+  Assert.Visible("Waiting", within: "12 Nov – 13 Nov 2026");
+  Ui.Click("Add");
+  Assert.Dialog("When are you not free?");
+  Ui.Select("Day", DayOfWeek.Friday);
+  Ui.Click("Save");
+  Assert.Visible("Fridays all day", within: "When you are not free");
+}
+
+[Test(WeekUnderway)]
+[runas(Dana)]
+void the_lead_builds_a_shift_fills_it_and_publishes_the_week() {
+  OnShift(Ada, "Opening");
+  Ui.Viewport(1440, 1000);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/rota");
+  Assert.Visible("Week of 2 November 2026");
+  Assert.Visible("Opening", within: "Tue 3 Nov");
+  Ui.Click("Add a shift on Fri 6 Nov");
+  Assert.Dialog("Add a shift");
+  Ui.Fill("Name", "Evening cover");
+  Ui.Fill("Starts", "17:00");
+  Ui.Fill("Ends", "22:00");
+  Ui.Click("Save");
+  Assert.Visible("Evening cover is added as a draft.");
+  Ui.Click("Evening cover · 17:00–22:00");
+  Assert.Dialog("Evening cover");
+  Ui.Fill("Find a person", "bo");
+  Ui.Click("Find");
+  Ui.Click("Put on", within: "Bo Lindqvist");
+  Assert.Visible("Bo Lindqvist is on Evening cover.");
+  Ui.Click("Done");
+  Ui.Shot("rota-week");
+  Ui.Click("Publish 2 drafts");
+  Assert.Visible("2 shifts are on the rota.");
+  Assert.Visible("Ada Moreno", within: "Hours this week");
+}
+
+[Test(WeekUnderway)]
+[runas(Dana)]
+void the_lead_answers_time_off_and_approves_cover() {
+  OnShift(Bo, "Closing");
+  runas(Bo) { RequestTimeOff(new DateOnly(2026, 11, 3), new DateOnly(2026, 11, 3), "Hospital appointment"); }
+  runas(Ada) { RequestTimeOff(new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 20), "Holiday"); }
+  ShiftCoverRequest? request = null;
+  runas(Bo) { request = RequestCover(ShiftAssignment.Single(a => a.Worker == Bo), "Appointment"); }
+  runas(Cy) { AcceptCover(request!); }
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/rota/requests");
+  Assert.Visible("Cy Park takes it from Bo Lindqvist (Appointment)");
+  Ui.Shot("rota-requests");
+  Ui.Click("Approve", within: "Bo Lindqvist");
+  Assert.Visible("Bo Lindqvist is off 3 Nov 2026 — and on 1 shift then: Closing. Find cover.");
+  Ui.Click("Approve", within: "Closing Tue 3 Nov · 16:00–21:00");
+  Assert.Visible("Cy Park is on Closing.");
+  Assert.Visible("Bo Lindqvist", within: "Away");
+}
+
+[Test(WeekUnderway)]
+void the_lead_adds_a_position_that_needs_a_course() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/rota/positions");
+  Ui.Click("Add a position");
+  Ui.Fill("Name", "Roastery");
+  Ui.Fill("Requires (key)", "roasting");
+  Ui.Fill("Requirement, as people read it", "Roasting course");
+  Ui.Click("Save");
+  Assert.Visible("Roastery is saved.");
+  Assert.Visible("Needs Roasting course", within: "Roastery");
+  Assert.Visible("Needs Espresso training", within: "Espresso bar");
+  Ui.Shot("rota-positions");
+}
+
+[Test(WeekUnderway)]
+[runas(Dana)]
+void the_pages_fit_a_phone_and_read_in_the_dark() {
+  OnShift(Bo, "Opening");
+  OnShift(Bo, "Closing");
+  Ui.SignInAs(Bo);
+  Ui.Viewport(390, 844);
+  Ui.Visit("/shifts");
+  Assert.Visible("Opening", within: "Coming up");
+  Assert.NoOverflow();
+  Ui.Shot("rota-my-shifts-phone");
+  Ui.Viewport(1440, 1000);
+  Ui.Theme("dark");
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/rota");
+  Assert.Visible("Week of 2 November 2026");
+  Ui.Shot("rota-week-dark");
+}

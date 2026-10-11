@@ -1,0 +1,128 @@
+// Getting onto a shift: numbered places never over-filled, one place a shift, no overlaps, a position's requirement,
+// the café's own rule, a weekly unavailability and the hours cap — each refusal a sentence.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_claims_an_open_place_and_gets_the_lowest_free_one() {
+  var first = ClaimShift(ShiftNamed("Opening"));
+  Assert.True(first.IsAssigned);
+  Assert.Equal("You are on Opening.", first.Message);
+  Assert.Equal(1, first.Assignment!.Slot);
+  runas(Ada) { Assert.Equal(2, ClaimShift(ShiftNamed("Opening")).Assignment!.Slot); }
+  runas(Cy) {
+    var full = ClaimShift(ShiftNamed("Opening"));
+    Assert.Equal(ShiftResult.Refused, full.Result);
+    Assert.Equal("This shift is full.", full.Message);
+  }
+  Assert.Equal(0, OpenPlaces(ShiftNamed("Opening")));
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void nobody_holds_two_places_on_one_shift_or_two_shifts_at_once() {
+  Assert.True(ClaimShift(ShiftNamed("Opening")).IsAssigned);
+  Assert.Equal("You are already on this shift.", ClaimShift(ShiftNamed("Opening")).Message);
+  Assert.True(ClaimShift(ShiftNamed("Closing")).IsAssigned);
+  runas(Dana) {
+    var clash = AssignShift(ShiftNamed("Espresso"), Ada);
+    Assert.True(clash.IsAssigned);
+    Assert.Equal("Bo Lindqvist is on Closing then.", AssignShift(ShiftNamed("Espresso"), Bo).Message);
+  }
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void the_espresso_bar_needs_the_training_the_cafe_answers() {
+  var refused = ClaimShift(ShiftNamed("Espresso"));
+  Assert.Equal(ShiftResult.Refused, refused.Result);
+  Assert.Equal("Espresso bar needs Espresso training: no record of the course.", refused.Message);
+  runas(Ada) { Assert.True(ClaimShift(ShiftNamed("Espresso")).IsAssigned); }
+}
+
+[Test(Cafe)]
+[runas(Cy)]
+void the_cafes_own_rule_keeps_a_trainee_off_a_shift_for_one() {
+  runas(Dana) { PublishShift(AddShift("Pastry prep", At(2, 6), At(2, 9))); }
+  Assert.Equal("Trainees never work a shift alone.", ClaimShift(ShiftNamed("Pastry prep")).Message);
+  Assert.True(ClaimShift(ShiftNamed("Opening")).IsAssigned);
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_draft_cannot_be_claimed_and_a_started_shift_cannot_be_joined() {
+  // To a barista a draft does not exist yet: asking for it is refused before anything is read.
+  Shift? brunch = null;
+  runas(Dana) { brunch = ShiftNamed("Weekend brunch"); }
+  Assert.Throws(() => ClaimShift(brunch!));
+  TestClock.Set(At(1, 8));
+  Assert.Equal("This shift has already started.", ClaimShift(ShiftNamed("Opening")).Message);
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_weekly_unavailability_refuses_a_claim_and_asks_the_lead_to_confirm() {
+  MarkUnavailable(Ada, DayOfWeek.Tuesday, new TimeOnly(15, 0), new TimeOnly(23, 0), "Evening class");
+  Assert.Equal("You are not free Tuesdays 15:00–23:00.", ClaimShift(ShiftNamed("Closing")).Message);
+  Assert.True(ClaimShift(ShiftNamed("Opening")).IsAssigned);
+  runas(Dana) {
+    var asked = AssignShift(ShiftNamed("Closing"), Ada);
+    Assert.Equal(ShiftResult.NeedsConfirmation, asked.Result);
+    Assert.Equal("Ada Moreno is not free Tuesdays 15:00–23:00.", asked.Message);
+    Assert.Equal(0, ShiftAssignment.Count(a => a.Shift.Title == "Closing"));
+    Assert.True(AssignShift(ShiftNamed("Closing"), Ada, true).IsAssigned);
+  }
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void the_hours_cap_is_a_warning_the_lead_can_go_past() {
+  // Opening, brunch and a late opening are 5 + 6 + 6 = 17 hours; six more make 23, over the café's 20.
+  var late = AddShift("Late opening", At(3, 7), At(3, 13));
+  PublishShift(late);
+  Assert.True(AssignShift(ShiftNamed("Opening"), Ada).IsAssigned);
+  Assert.True(AssignShift(ShiftNamed("Weekend brunch"), Ada).IsAssigned);
+  Assert.True(AssignShift(late, Ada).IsAssigned);
+  var extra = AddShift("Inventory", At(4, 7), At(4, 13));
+  var over = AssignShift(extra, Ada);
+  Assert.Equal(ShiftResult.NeedsConfirmation, over.Result);
+  Assert.Equal("That makes 23 hours that week, over the 20 allowed.", over.Message);
+  Assert.True(AssignShift(extra, Ada, true).IsAssigned);
+  Assert.Equal(23m, WeekHoursOf(Ada, new DateOnly(2026, 11, 4)));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void approved_time_off_refuses_every_way_onto_a_shift() {
+  RecordTimeOff(Bo, new DateOnly(2026, 11, 3), new DateOnly(2026, 11, 3), "Dentist");
+  Assert.Equal("Bo Lindqvist is off on 3 Nov.", AssignShift(ShiftNamed("Opening"), Bo, true).Message);
+  runas(Bo) { Assert.Equal("You are off on 3 Nov.", ClaimShift(ShiftNamed("Closing")).Message); }
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_drops_a_shift_far_enough_ahead_and_not_the_day_before() {
+  var brunch = OnShift(Bo, "Weekend brunch");
+  var opening = ClaimShift(ShiftNamed("Opening")).Assignment;
+  Assert.Equal("It is too close to the start to drop this shift — ask for cover instead.",
+               Assert.Throws<ValidationException>(() => DropShift(opening)).Message);
+  runas(Dana) { PublishShift(ShiftNamed("Weekend brunch")); }
+  DropShift(brunch);
+  Assert.Equal(0, ShiftAssignment.Count(a => a.Shift.Title == "Weekend brunch"));
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "unassigned" && h.Detail == "Weekend brunch:Bo Lindqvist#1"));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void the_lead_takes_somebody_off_and_the_place_is_free_again() {
+  var a = OnShift(Ada, "Opening");
+  OnShift(Bo, "Opening");
+  Assert.Equal(0, OpenPlaces(ShiftNamed("Opening")));
+  Unassign(a);
+  Assert.Equal(1, OpenPlaces(ShiftNamed("Opening")));
+  Assert.Equal(1, AssignShift(ShiftNamed("Opening"), Cy).Assignment!.Slot);
+}

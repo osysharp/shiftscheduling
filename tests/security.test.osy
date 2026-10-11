@@ -1,0 +1,64 @@
+// The rules declared on the data, each proved as the person it is about.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_cannot_make_take_or_hand_over_a_place_directly() {
+  var adas = OnShift(Ada, "Opening");
+  Assert.Denied(() => { new ShiftAssignment { Shift = ShiftNamed("Closing"), Worker = Bo, Slot = 1 }; UnitOfWork.Commit(); });
+  Assert.Denied(() => { adas.Worker = Bo; UnitOfWork.Commit(); });
+  Assert.Denied(() => { adas.Delete(); UnitOfWork.Commit(); });
+  Assert.Throws(() => AssignShift(ShiftNamed("Closing"), Bo));
+  Assert.Throws(() => Unassign(adas));
+  Assert.Throws<NotAuthorized>(() => DropShift(adas));
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_cannot_build_the_rota_or_answer_requests() {
+  Assert.Throws(() => AddShift("Mine", At(2, 9), At(2, 17)));
+  Assert.Throws(() => PublishShifts(At(0, 0), At(7, 0)));
+  Assert.Throws(() => CancelShift(ShiftNamed("Opening")));
+  Assert.Denied(() => { ShiftNamed("Opening").Note = "mine"; UnitOfWork.Commit(); });
+  var mine = RequestTimeOff(new DateOnly(2026, 11, 20), new DateOnly(2026, 11, 20));
+  Assert.Throws(() => DecideTimeOff(mine, true));
+  Assert.Denied(() => { mine.State = TimeOffState.Approved; UnitOfWork.Commit(); });
+}
+
+[Test(Cafe)]
+[runas(Ada)]
+void a_barista_reads_their_own_time_off_and_nobody_elses() {
+  RequestTimeOff(new DateOnly(2026, 11, 20), new DateOnly(2026, 11, 21), "Wedding");
+  runas(Bo) {
+    RequestTimeOff(new DateOnly(2026, 11, 24), new DateOnly(2026, 11, 24), "Choir tour");
+    Assert.Equal(1, TimeOffRequest.Count());
+    MarkUnavailable(Bo, DayOfWeek.Friday, new TimeOnly(0, 0), new TimeOnly(0, 0));
+    Assert.Throws<NotAuthorized>(() => MarkUnavailable(Ada, DayOfWeek.Friday, new TimeOnly(0, 0), new TimeOnly(0, 0)));
+  }
+  Assert.Equal(1, TimeOffRequest.Count());
+  Assert.Equal(0, Unavailability.Count());
+  runas(Dana) { Assert.Equal(2, TimeOffRequest.Count()); Assert.Equal(1, Unavailability.Count()); }
+}
+
+[Test(Cafe)]
+[runas(Eve)]
+void somebody_not_on_the_rota_sees_none_of_it_and_takes_nothing() {
+  OnShift(Ada, "Opening");
+  Assert.Equal(0, Shift.Count());
+  Assert.Equal(0, ShiftAssignment.Count());
+  Assert.Equal(0, ShiftPosition.Count());
+  Assert.Throws(() => ClaimShift(ShiftNamed("Opening")));
+  Assert.Throws(() => RequestTimeOff(new DateOnly(2026, 11, 20), new DateOnly(2026, 11, 20)));
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_sees_who_else_is_on_a_published_shift() {
+  OnShift(Ada, "Opening");
+  OnShift(Ada, "Weekend brunch");
+  Assert.Equal(1, CrewOf(ShiftNamed("Opening")).Count);
+  Assert.Equal(1, ShiftAssignment.Count());
+}

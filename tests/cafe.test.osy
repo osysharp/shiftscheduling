@@ -1,0 +1,53 @@
+// The café every test starts from, on Monday 2 November 2026 at 08:00 in London (UTC that time of year): three baristas
+// (Cy is a trainee, Ada is trained on espresso), a shift lead, somebody not on the rota, two positions and a week of
+// shifts — three published on Tuesday, a draft brunch on Saturday.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+principal Ada => User.Single(u => u.Email == "ada@cafe.test");
+principal Bo => User.Single(u => u.Email == "bo@cafe.test");
+principal Cy => User.Single(u => u.Email == "cy@cafe.test");
+principal Dana => User.Single(u => u.Email == "dana@cafe.test");
+principal Eve => User.Single(u => u.Email == "eve@cafe.test");
+
+/// 08:00 on Monday 2 November 2026 — the moment every test starts at.
+DateTime Monday() { return new DateTime(2026, 11, 2, 8, 0, 0); }
+
+/// A time that week: `day` 0 is Monday.
+DateTime At(int day, int hour) { return new DateTime(2026, 11, 2, 0, 0, 0).AddDays(day).AddHours(hour); }
+
+[TestFixture]
+void Cafe() {
+  TestClock.Set(Monday());
+  var ada = new User { Email = "ada@cafe.test", DisplayName = "Ada Moreno" };
+  var bo = new User { Email = "bo@cafe.test", DisplayName = "Bo Lindqvist" };
+  var cy = new User { Email = "cy@cafe.test", DisplayName = "Cy Park" };
+  var dana = new User { Email = "dana@cafe.test", DisplayName = "Dana Ruiz" };
+  new User { Email = "eve@cafe.test", DisplayName = "Eve Okafor" };
+  new RoleGrant { Member = ada, Role = CafeRole.Barista };
+  new RoleGrant { Member = bo, Role = CafeRole.Barista };
+  new RoleGrant { Member = cy, Role = CafeRole.Barista };
+  new RoleGrant { Member = dana, Role = CafeRole.ShiftLead };
+  new Trainee { Person = cy };
+  new Training { Person = ada, Course = "espresso", PassedOn = new DateOnly(2026, 3, 1) };
+  var floor = new ShiftPosition { Name = "Floor", SortOrder = 1 };
+  var espresso = new ShiftPosition { Name = "Espresso bar", SortOrder = 2 };
+  new PositionRequirement { Position = espresso, Key = "espresso", Label = "Espresso training" };
+  new Shift { Title = "Opening", Position = floor, StartsAt = At(1, 7), EndsAt = At(1, 12), Needed = 2, State = ShiftState.Published };
+  new Shift { Title = "Espresso", Position = espresso, StartsAt = At(1, 12), EndsAt = At(1, 17), BreakMinutes = 30, State = ShiftState.Published };
+  new Shift { Title = "Closing", Position = floor, StartsAt = At(1, 16), EndsAt = At(1, 21), Needed = 2, State = ShiftState.Published };
+  new Shift { Title = "Weekend brunch", Position = floor, StartsAt = At(5, 9), EndsAt = At(5, 15), Needed = 3 };
+}
+
+Shift ShiftNamed(string title) { return Shift.Single(s => s.Title == title); }
+
+int HeardCount(string what) { return Heard.Count(h => h.Event == what); }
+
+/// Put `worker` on the shift as the shift lead, past any warning.
+ShiftAssignment OnShift(Principal worker, string title) {
+  ShiftAssignment? a = null;
+  runas(Dana) { a = AssignShift(ShiftNamed(title), worker, true).Assignment; }
+  return a!;
+}

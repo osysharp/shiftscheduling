@@ -1,0 +1,75 @@
+// Everything the café says to the rota: its roles and its answers to the kit's policies, its settings, the training its
+// espresso bar needs, its own rule about trainees, and what it does when the kit tells it something.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Role] enum CafeRole { Authenticator, Barista, [Label("Shift lead")] ShiftLead }
+
+policy IsBarista => RoleGrant.Any(g => g.Member == user && g.Role == CafeRole.Barista);
+policy IsShiftLead => RoleGrant.Any(g => g.Member == user && g.Role == CafeRole.ShiftLead);
+
+/// The shift lead builds the week; baristas work it.
+policy ManagesShifts => IsShiftLead;
+policy WorksShifts => IsBarista;
+
+app.Accounts = new AccountsSetup { AppName = "Juniper Café", SignupRole = CafeRole.Barista };
+app.ShiftScheduling = new ShiftSchedulingSetup {
+  TimeZone = "Europe/London",
+  ReminderLead = TimeSpan.FromHours(12),
+  WorkersMayDrop = true,
+  DropCutoff = TimeSpan.FromHours(48),
+  MaxHoursPerWeek = 20m,
+};
+
+/// A course somebody passed — the café's own record, which its espresso bar asks about.
+entity Training {
+  [Required("Whose training is it?")] Principal Person;
+  [MaxLength(60)] string Course;
+  DateOnly PassedOn;
+  security { allow read when IsAuthenticated; }
+}
+
+/// Somebody still learning — the café's own fact, used by its own rule.
+entity Trainee {
+  [Required("Who is the trainee?")] Principal Person;
+  security { allow read when IsAuthenticated; }
+}
+
+/// The café answers the kit's requirements from its training records: a requirement's key is a course's name.
+public class CafeTraining : IShiftRequirements {
+  public string? Unmet(Principal worker, string requirement, DateTime on) {
+    var day = DateOnly.FromDateTime(on);
+    if (Training.Any(t => t.Person == worker && t.Course == requirement && t.PassedOn <= day)) { return null; }
+    return "no record of the course.";
+  }
+}
+
+/// The café's own rule: a trainee never works a shift alone.
+public class TraineesNeverAlone : IShiftRule {
+  public string? Refusal(Shift shift, Principal worker) {
+    if (shift.Needed > 1 || !Trainee.Any(t => t.Person == worker)) { return null; }
+    return "Trainees never work a shift alone.";
+  }
+}
+
+/// What the café heard from the rota, one row per event — a stand-in for the messages it would send.
+entity Heard {
+  [MaxLength(40)] string Event = "";
+  [MaxLength(200)] string Detail = "";
+  security { allow read when IsAuthenticated; }
+}
+
+[On] void HearAssigned(ShiftAssigned e) { new Heard { Event = "assigned", Detail = e.Assignment.Shift.Title + ":" + e.Assignment.Worker.DisplayName }; }
+[On] void HearUnassigned(ShiftUnassigned e) { new Heard { Event = "unassigned", Detail = e.Shift.Title + ":" + e.Worker.DisplayName + "#" + e.Slot }; }
+[On] void HearPublished(ShiftsPublished e) { new Heard { Event = "published", Detail = e.Shifts.Count + ":" + e.Workers.Count }; }
+[On] void HearChanged(ShiftChanged e) { new Heard { Event = "changed", Detail = e.Shift.Title + ":" + e.Workers.Count }; }
+[On] void HearCancelled(ShiftCancelled e) { new Heard { Event = "cancelled", Detail = e.Shift.Title + ":" + e.Workers.Count }; }
+[On] void HearReminder(ShiftReminderDue e) { new Heard { Event = "reminder", Detail = e.Assignment.Shift.Title + ":" + e.Assignment.Worker.DisplayName }; }
+[On] void HearCoverRequested(CoverRequested e) { new Heard { Event = "coverrequested", Detail = e.Request.Assignment.Shift.Title }; }
+[On] void HearCoverTaken(CoverTaken e) { new Heard { Event = "covertaken", Detail = e.Request.TakenBy!.DisplayName }; }
+[On] void HearCovered(ShiftCovered e) { new Heard { Event = "covered", Detail = e.Request.Assignment.Shift.Title + ":" + e.Request.TakenBy!.DisplayName }; }
+[On] void HearCoverDeclined(CoverDeclined e) { new Heard { Event = "coverdeclined", Detail = e.Request.Assignment.Shift.Title }; }
+[On] void HearTimeOffRequested(TimeOffRequested e) { new Heard { Event = "timeoffrequested", Detail = e.Request.Worker.DisplayName }; }
+[On] void HearTimeOffDecided(TimeOffDecided e) { new Heard { Event = "timeoffdecided", Detail = e.Request.Worker.DisplayName + ":" + e.Request.State.Label }; }

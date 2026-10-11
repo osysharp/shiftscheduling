@@ -1,0 +1,28 @@
+// Forgetting a person: a privacy erasure (Osysharp.Privacy.ShiftScheduling calls it), or somebody who has left.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// Remove everything the rota holds about `person`: their places on shifts (those to come free up again), the time off
+/// they asked for, the hours they said they are not free, and the requests for cover they made or took. Shifts stay.
+/// Answers how many rows went.
+[Server, Authorize(ManagesShifts)]
+[SuppressWarning("cost-unbounded-read")]   // an erasure takes every row of one person, however many there are
+public int EraseRotaDataOf(Principal person) {
+  var n = 0;
+  var places = ShiftAssignment.Where(a => a.Worker == person).Select(a => a.Id).ToList();
+  foreach (var c in ShiftCoverRequest.Where(c => c.From == person || c.TakenBy == person || c.OfferedTo == person
+                                                 || places.Contains(c.Assignment.Id)
+                                                 || (c.InExchangeFor != null && places.Contains(c.InExchangeFor.Id))).ToList()) {
+    c.Delete(); n = n + 1;
+  }
+  foreach (var c in ShiftCoverRequest.Where(c => c.DecidedBy == person).ToList()) { c.DecidedBy = null; }
+  foreach (var r in TimeOffRequest.Where(r => r.Worker == person).ToList()) { r.Delete(); n = n + 1; }
+  foreach (var r in TimeOffRequest.Where(r => r.DecidedBy == person).ToList()) { r.DecidedBy = null; }
+  foreach (var u in Unavailability.Where(u => u.Worker == person).ToList()) { u.Delete(); n = n + 1; }
+  foreach (var a in ShiftAssignment.Where(a => a.Worker == person).ToList()) { ShiftReminder.RaiseStop(a); a.Delete(); n = n + 1; }
+  UnitOfWork.Commit();
+  return n;
+}

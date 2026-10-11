@@ -1,0 +1,167 @@
+// The data of Osysharp.ShiftScheduling — positions, shifts, the places people hold on them — and what the kit asks its app.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+
+// ── what the app answers ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// THE SEAM — who runs the rota: adds, changes, publishes and cancels shifts, puts anybody on one or takes them off,
+/// approves time off, cover and swaps, and reads everything. Nobody, until the app says: `policy ManagesShifts => IsManager;`.
+virtual policy ManagesShifts => false;
+
+/// THE SEAM — who works shifts: reads the published rota and who is on each shift, claims open places, asks for time off
+/// and for cover. Nobody, until the app says: `policy WorksShifts => IsStaff;`. Somebody who runs the rota needs no second
+/// grant to read it.
+virtual policy WorksShifts => false;
+
+/// Whoever reads the rota: those who work shifts and those who run it.
+virtual policy SeesShifts => WorksShifts || ManagesShifts;
+
+/// The app's own say over who may take a shift, beyond what the kit checks. Implementations are FOUND — nothing wires
+/// them: `public class BarNeedsAge : IShiftRule { public string? Refusal(Shift shift, Principal worker) { … } }`.
+public interface IShiftRule {
+  /// Why `worker` may not take `shift` — or null when this rule has no objection.
+  string? Refusal(Shift shift, Principal worker);
+}
+
+/// Answers a position's requirements ("food-hygiene", "forklift", "first-aid"): whether a person meets one on a day.
+/// Found, never wired — an app writes one, or a bridge to a qualifications kit brings it. With several, a requirement is met
+/// when any of them confirms it. With a requirement declared and nothing that answers it, nobody meets it: the kit never
+/// assumes a person qualifies.
+public interface IShiftRequirements {
+  /// Why `worker` does not meet `requirement` at `on` — or null when they do.
+  string? Unmet(Principal worker, string requirement, DateTime on);
+}
+
+/// How the app runs its rota — `app.ShiftScheduling = new ShiftSchedulingSetup { … }`. Every member has a working default.
+[AppSetting("ShiftScheduling")]
+public class ShiftSchedulingSetup {
+  /// The rota's wall clock, an IANA id ("Europe/London"): where a week starts, what a day of time off covers, and when a
+  /// weekly unavailability applies. Shifts themselves are moments, kept in UTC.
+  public string TimeZone = "UTC";
+  /// How long before a shift starts the person on it is reminded (`ShiftReminderDue`). Zero: no reminders.
+  public TimeSpan ReminderLead = TimeSpan.FromHours(24);
+  /// Whether people who work shifts may claim an open place on a published shift themselves.
+  public bool WorkersClaimOpenShifts = true;
+  /// Whether a worker may give up a place themselves — no later than `DropCutoff` before it starts. Otherwise they ask
+  /// for cover, and somebody takes it.
+  public bool WorkersMayDrop = false;
+  public TimeSpan DropCutoff = TimeSpan.FromHours(48);
+  /// Whether cover and swaps wait for a manager's approval once somebody takes them.
+  public bool CoverNeedsApproval = true;
+  /// Whether a worker may ask for time off — at least `TimeOffNoticeDays` ahead.
+  public bool WorkersRequestTimeOff = true;
+  public int TimeOffNoticeDays = 0;
+  /// The most hours a person may be put on in one week (from Monday); 0: no cap. A manager may go past it knowingly.
+  public decimal MaxHoursPerWeek = 0m;
+}
+
+// ── the data ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A kind of work a shift is for — "Front desk", "Kitchen", "Night nurse". A shift need not have one.
+public entity ShiftPosition {
+  [Required, Unique("A position with this name already exists."), MaxLength(80)] string Name;
+  [MaxLength(300)] string Description = "";
+  /// Retired positions are kept — shifts point at them — and offered no more.
+  bool Active = true;
+  int SortOrder = 0;
+
+  security {
+    allow read when SeesShifts;
+    allow create, update when ManagesShifts;
+  }
+}
+
+/// Something a person must meet to work a position: a key the app's `IShiftRequirements` answers ("food-hygiene").
+[Unique(Position, Key, "The position already requires that.")]
+public entity PositionRequirement {
+  [Required, Immutable] ShiftPosition Position;
+  [Required, Immutable, MaxLength(80)] string Key;
+  /// What people read ("Food hygiene certificate"); the key when empty.
+  [MaxLength(120)] string Label = "";
+
+  security {
+    allow read when SeesShifts;
+    allow create, update, delete when ManagesShifts;
+  }
+}
+
+/// Where a shift is. ⚠ Appended, never inserted.
+public enum ShiftState {
+  /// Being planned: only those who run the rota see it, and nobody is reminded of it.
+  [Label("Draft")] Draft,
+  /// On the rota for everyone who works shifts.
+  [Label("Published")] Published,
+  /// Called off — kept, with whoever was on it.
+  [Label("Cancelled")] Cancelled,
+}
+
+/// One shift: when, for what, and how many people it needs. Its times, headcount and state change only through the kit's
+/// functions (`UpdateShift`, `PublishShifts`, `CancelShift`), so nobody is ever left on a shift that silently moved or
+/// shrank. A draft that was never published may be deleted; a published one is cancelled, never deleted.
+public entity Shift {
+  [Required, MaxLength(120)] string Title;
+  ShiftPosition? Position;
+  DateTime StartsAt;
+  DateTime EndsAt;
+  /// Unpaid break inside the shift — taken off its hours.
+  [Min(0), Max(720)] int BreakMinutes = 0;
+  /// How many people it needs — and so how many numbered places it has.
+  [Min(1), Max(500)] int Needed = 1;
+  [MaxLength(120)] string Location = "";
+  [MaxLength(500)] string Note = "";
+  ShiftState State = ShiftState.Draft;
+  DateTime? PublishedAt;
+  DateTime? CancelledAt;
+  [MaxLength(300)] string CancelReason = "";
+
+  invariant EndsAt > StartsAt message "A shift must end after it starts.";
+
+  security {
+    allow read when ManagesShifts;
+    allow read when WorksShifts where State != ShiftState.Draft;
+    allow create, update when ManagesShifts;
+    deny update StartsAt, EndsAt, Needed except via UpdateShift;
+    deny update State except via PublishShifts, CancelShift;
+    deny update PublishedAt except via PublishShifts;
+    deny update CancelledAt, CancelReason except via CancelShift;
+    allow delete when ManagesShifts;
+    deny delete except via DeleteDraftShift;
+  }
+}
+
+/// Where the reminder of a place stands — `ShiftReminder` owns it.
+public enum ReminderState { Waiting, Sent, Stopped }
+
+/// A person's place on a shift. Made by `AssignShift` or `ClaimShift`, handed over only by cover or a swap, and given up
+/// by `Unassign` or `DropShift`. A place is held by one person, and a person holds one place a shift — declared here, so
+/// no write can break either.
+[Unique(Shift, Slot, "That place on the shift is already taken.")]
+[Unique(Shift, Worker, "Already on this shift.")]
+// Any signed-in person may hold a place, so the holder's own rule is asked of every caller by design.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity ShiftAssignment {
+  [Required, Immutable] Shift Shift;
+  [Required] Principal Worker;
+  /// The numbered place held on the shift, 1 to its `Needed`.
+  [Min(1), Immutable] int Slot;
+  [Immutable] DateTime AssignedAt = DateTime.UtcNow;
+  /// Who put them on — themselves when they claimed it.
+  [Immutable] Principal? AssignedBy;
+  /// When the reminder went out — set once, by the reminder.
+  DateTime? RemindedAt;
+  ReminderState Reminder;         // no default — ShiftReminder owns it
+
+  security {
+    allow read when ManagesShifts;
+    allow read when WorksShifts where Shift.State != ShiftState.Draft;
+    allow read when IsAuthenticated where Worker == user && Shift.State != ShiftState.Draft;
+    // Every write is one of the kit's functions, which say whose place it is and whether it may change hands.
+    allow create, update, delete when IsAuthenticated;
+    deny create except via AssignShift, ClaimShift;
+    deny update Worker except via AcceptCover, DecideCover;
+    deny update RemindedAt;
+    deny delete except via Unassign, DropShift, DeleteDraftShift, EraseRotaDataOf;
+  }
+}

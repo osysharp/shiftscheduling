@@ -1,0 +1,211 @@
+// When people cannot work: time off they ask for and a manager approves, and the hours of the week they are never free.
+// Both are asked before anybody is put on a shift — an approved absence refuses it, a weekly unavailability refuses a
+// claim and asks a manager to confirm.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+
+// ── the rota's wall clock ───────────────────────────────────────────────────────────────────────────────────────────
+
+/// The rota's time zone (`ShiftSchedulingSetup.TimeZone`).
+public Zone RotaZone() { return Zone.Of(App.Setting<ShiftSchedulingSetup>().TimeZone); }
+
+/// A moment as the rota's wall clock reads it.
+public DateTime RotaLocal(DateTime instant) { return instant.InZone(RotaZone()); }
+
+/// The moment a day starts on the rota's clock.
+public DateTime RotaDayStart(DateOnly day) { return RotaZone().Resolve(day, new TimeOnly(0, 0)); }
+
+/// The Monday of the week `day` falls in.
+public DateOnly RotaWeekOf(DateOnly day) { return day.AddDays(-(((int)day.DayOfWeek + 6) % 7)); }
+
+/// Today on the rota's clock.
+public DateOnly RotaToday() { return DateOnly.FromDateTime(RotaLocal(DateTime.UtcNow)); }
+
+// ── time off ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Where a request for time off stands. ⚠ Appended, never inserted.
+public enum TimeOffState {
+  [Label("Waiting")] Pending,
+  [Label("Approved")] Approved,
+  [Label("Declined")] Declined,
+  [Label("Withdrawn")] Withdrawn,
+}
+
+/// Days a person asks not to work, from `From` through `To` on the rota's clock. Made by `RequestTimeOff` (or a manager's
+/// `RecordTimeOff`); decided only by `DecideTimeOff`.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity TimeOffRequest {
+  [Required, Immutable] Principal Worker;
+  [Immutable] DateOnly From;
+  [Immutable] DateOnly To;
+  [Immutable, MaxLength(300), Classification(Personal.Content)] string Reason = "";
+  [Immutable] DateTime RequestedAt = DateTime.UtcNow;
+  TimeOffState State = TimeOffState.Pending;
+  Principal? DecidedBy;
+  DateTime? DecidedAt;
+  [MaxLength(300), Classification(Personal.Content)] string DecisionNote = "";
+
+  invariant To >= From message "Time off must end on or after the day it starts.";
+
+  security {
+    allow read when ManagesShifts;
+    allow read when IsAuthenticated where Worker == user;
+    allow create, update when IsAuthenticated;
+    deny create except via RequestTimeOff, RecordTimeOff;
+    deny update State except via DecideTimeOff, WithdrawTimeOff;
+    deny update DecidedBy except via DecideTimeOff, EraseRotaDataOf;
+    deny update DecidedAt, DecisionNote except via DecideTimeOff;
+    allow delete when ManagesShifts;
+    deny delete except via EraseRotaDataOf;
+  }
+}
+
+/// Hours of the week somebody is never free — "Tuesdays all day", "Fridays from 15:00" — on the rota's clock.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity Unavailability {
+  [Required, Immutable] Principal Worker;
+  [Immutable] DayOfWeek Day;
+  /// From when, and until when, that day; `00:00`–`00:00` is the whole day.
+  [Immutable] TimeOnly From = new TimeOnly(0, 0);
+  [Immutable] TimeOnly Until = new TimeOnly(0, 0);
+  [MaxLength(200), Classification(Personal.Content)] string Note = "";
+
+  security {
+    allow read when ManagesShifts;
+    allow read when IsAuthenticated where Worker == user;
+    allow create, delete when IsAuthenticated where Worker == user;
+    allow create, delete when ManagesShifts;
+  }
+}
+
+/// A request for time off was made.
+[Event("Time off requested")]
+public sealed class TimeOffRequested { public TimeOffRequest Request; }
+
+/// A request for time off was approved or declined — `Request.State` says which.
+[Event("Time off decided")]
+public sealed class TimeOffDecided { public TimeOffRequest Request; }
+
+/// The first moment of `r`, and the moment after its last day.
+public DateTime TimeOffStarts(TimeOffRequest r) { return RotaDayStart(r.From); }
+public DateTime TimeOffEnds(TimeOffRequest r) { return RotaDayStart(r.To.AddDays(1)); }
+
+/// Ask for days off. Refused — with the reason — when the app does not let workers ask, when it is too soon, or when it
+/// overlaps a request already waiting or approved.
+[Server, Authorize(WorksShifts)]
+public TimeOffRequest RequestTimeOff(DateOnly from, DateOnly to, string reason = "") {
+  var setup = App.Setting<ShiftSchedulingSetup>();
+  if (!setup.WorkersRequestTimeOff) { throw new ValidationException("Time off is arranged with whoever runs the rota."); }
+  if (to < from) { throw new ValidationException("Time off must end on or after the day it starts."); }
+  var today = RotaToday();
+  if (from < today.AddDays(setup.TimeOffNoticeDays)) {
+    throw new ValidationException(setup.TimeOffNoticeDays == 0
+      ? "Time off cannot start in the past."
+      : $"Time off is asked for at least {setup.TimeOffNoticeDays} days ahead.");
+  }
+  var me = CurrentPrincipal();
+  if (TimeOffRequest.Any(r => r.Worker == me && (r.State == TimeOffState.Pending || r.State == TimeOffState.Approved)
+                              && r.From <= to && r.To >= from)) {
+    throw new ValidationException("You have already asked for time off on some of those days.");
+  }
+  var request = new TimeOffRequest { Worker = me, From = from, To = to, Reason = reason.Trim() };
+  Raise(new TimeOffRequested { Request = request });
+  UnitOfWork.Commit();
+  return request;
+}
+
+/// A manager records time off for somebody — approved at once (a sickness reported by phone, leave agreed in person).
+[Server, Authorize(ManagesShifts)]
+public TimeOffRequest RecordTimeOff(Principal worker, DateOnly from, DateOnly to, string reason = "") {
+  if (to < from) { throw new ValidationException("Time off must end on or after the day it starts."); }
+  var request = new TimeOffRequest { Worker = worker, From = from, To = to, Reason = reason.Trim(),
+                                     State = TimeOffState.Approved, DecidedBy = CurrentPrincipal(), DecidedAt = DateTime.UtcNow };
+  Raise(new TimeOffDecided { Request = request });
+  UnitOfWork.Commit();
+  return request;
+}
+
+/// Approve or decline a request. Approving answers the shifts the person is already on in that time, for the manager to
+/// find cover for — the kit never takes anybody off a shift by itself.
+[Server, Authorize(ManagesShifts)]
+public List<ShiftAssignment> DecideTimeOff(TimeOffRequest request, bool approve, string note = "") {
+  if (request.State != TimeOffState.Pending) { throw new ValidationException("That request has already been answered."); }
+  request.State = approve ? TimeOffState.Approved : TimeOffState.Declined;
+  request.DecidedBy = CurrentPrincipal();
+  request.DecidedAt = DateTime.UtcNow;
+  request.DecisionNote = note.Trim();
+  Raise(new TimeOffDecided { Request = request });
+  UnitOfWork.Commit();
+  if (!approve) { return []; }
+  var starts = TimeOffStarts(request);
+  var ends = TimeOffEnds(request);
+  var worker = request.Worker;
+  return ShiftAssignment.Where(a => a.Worker == worker && a.Shift.State != ShiftState.Cancelled
+                                    && a.Shift.StartsAt < ends && a.Shift.EndsAt > starts)
+                        .OrderBy(a => a.Shift.StartsAt).Take(100).ToList();
+}
+
+/// Take back a request — one still waiting, or approved time off that has not started.
+[Server, Authorize(IsAuthenticated)]
+public void WithdrawTimeOff(TimeOffRequest request) {
+  if (request.Worker.Id != CurrentPrincipal().Id && !ManagesShifts) {
+    throw new NotAuthorized("Only the person who asked, or whoever runs the rota, can take this back.");
+  }
+  if (request.State == TimeOffState.Declined || request.State == TimeOffState.Withdrawn) { return; }
+  if (request.State == TimeOffState.Approved && request.From <= RotaToday() && !ManagesShifts) {
+    throw new ValidationException("That time off has started; ask whoever runs the rota.");
+  }
+  request.State = TimeOffState.Withdrawn;
+  UnitOfWork.Commit();
+}
+
+/// Mark an hour of the week you are never free. Somebody who runs the rota may mark it for anybody.
+[Server, Authorize(IsAuthenticated)]
+public Unavailability MarkUnavailable(Principal worker, DayOfWeek day, TimeOnly from, TimeOnly until, string note = "") {
+  if (worker.Id != CurrentPrincipal().Id && !ManagesShifts) {
+    throw new NotAuthorized("Only the person themself, or whoever runs the rota, can say when they are free.");
+  }
+  if (!WorksShifts && !ManagesShifts) { throw new NotAuthorized("You are not on the rota."); }
+  var wholeDay = from == new TimeOnly(0, 0) && until == new TimeOnly(0, 0);
+  if (!wholeDay && until <= from) { throw new ValidationException("Say until when — after it starts — or mark the whole day."); }
+  var u = new Unavailability { Worker = worker, Day = day, From = from, Until = until, Note = note.Trim() };
+  UnitOfWork.Commit();
+  return u;
+}
+
+/// Take back an hour of the week marked as not free.
+[Server, Authorize(IsAuthenticated)]
+public void ForgetUnavailability(Unavailability u) {
+  u.Delete();
+  UnitOfWork.Commit();
+}
+
+/// The day of the week as people read it.
+public string WeekdayName(DayOfWeek d) {
+  return d == DayOfWeek.Monday ? "Mondays" : d == DayOfWeek.Tuesday ? "Tuesdays" : d == DayOfWeek.Wednesday ? "Wednesdays"
+    : d == DayOfWeek.Thursday ? "Thursdays" : d == DayOfWeek.Friday ? "Fridays" : d == DayOfWeek.Saturday ? "Saturdays" : "Sundays";
+}
+
+/// "Tuesdays all day", "Fridays 15:00–23:00".
+public string UnavailabilityText(Unavailability u) {
+  var wholeDay = u.From == new TimeOnly(0, 0) && u.Until == new TimeOnly(0, 0);
+  return WeekdayName(u.Day) + (wholeDay ? " all day" : " " + u.From.ToString("HH:mm") + "–" + u.Until.ToString("HH:mm"));
+}
+
+/// Does a weekly unavailability fall inside `starts`–`ends`? Walks each local day the shift touches.
+public bool UnavailableDuring(Unavailability u, DateTime starts, DateTime ends) {
+  var day = DateOnly.FromDateTime(RotaLocal(starts));
+  var last = DateOnly.FromDateTime(RotaLocal(ends));
+  while (day <= last) {
+    if (day.DayOfWeek == u.Day) {
+      var wholeDay = u.From == new TimeOnly(0, 0) && u.Until == new TimeOnly(0, 0);
+      var from = RotaZone().Resolve(day, u.From);
+      var until = wholeDay ? RotaDayStart(day.AddDays(1)) : RotaZone().Resolve(day, u.Until);
+      if (from < ends && until > starts) { return true; }
+    }
+    day = day.AddDays(1);
+  }
+  return false;
+}

@@ -1,0 +1,194 @@
+// Building the rota: adding and changing shifts, publishing a week in one go, copying a week, cancelling — and the hours
+// each person is on.
+
+namespace Osysharp.ShiftScheduling;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// Shifts went on the rota — everybody on them is named, to be told once rather than once a shift.
+[Event("Shifts published")]
+public sealed class ShiftsPublished {
+  public List<Shift> Shifts;
+  public List<Principal> Workers;
+}
+
+/// A published shift moved — its times changed. The people on it are named.
+[Event("Shift changed")]
+public sealed class ShiftChanged {
+  public Shift Shift;
+  public List<Principal> Workers;
+}
+
+/// A shift was cancelled. The people who were on it are named; their reminders are stopped.
+[Event("Shift cancelled")]
+public sealed class ShiftCancelled {
+  public Shift Shift;
+  public List<Principal> Workers;
+}
+
+/// Add a shift — a draft until it is published. In code a manager may also write `new Shift { … }` directly.
+[Server, Authorize(ManagesShifts)]
+public Shift AddShift(string title, DateTime startsAt, DateTime endsAt, int needed = 1, ShiftPosition? position = null,
+                      int breakMinutes = 0, string location = "", string note = "") {
+  if (endsAt <= startsAt) { throw new ValidationException("A shift must end after it starts."); }
+  var s = new Shift { Title = title.Trim(), StartsAt = startsAt, EndsAt = endsAt, Needed = needed, Position = position,
+                      BreakMinutes = breakMinutes, Location = location.Trim(), Note = note.Trim() };
+  UnitOfWork.Commit();
+  return s;
+}
+
+/// Change a shift's times and headcount. Refused — with the reason — when it would leave somebody on it with a clash,
+/// or cut places already taken. On a published shift its people are told (`ShiftChanged`) and their reminders re-set.
+[Server, Authorize(ManagesShifts)]
+public void UpdateShift(Shift shift, DateTime startsAt, DateTime endsAt, int needed) {
+  if (shift.State == ShiftState.Cancelled) { throw new ValidationException("This shift is cancelled."); }
+  if (endsAt <= startsAt) { throw new ValidationException("A shift must end after it starts."); }
+  if (needed < 1) { throw new ValidationException("A shift needs at least one person."); }
+  var crew = CrewOf(shift);
+  var highest = crew.Count == 0 ? 0 : crew.Max(a => a.Slot);
+  if (needed < highest) {
+    throw new ValidationException($"Somebody holds place {highest}, so the shift cannot need fewer than {highest}. Take them off first.");
+  }
+  var moved = startsAt != shift.StartsAt || endsAt != shift.EndsAt;
+  if (moved) {
+    var shiftId = shift.Id;
+    foreach (var a in crew) {
+      var worker = a.Worker;
+      var clash = ShiftAssignment.Where(x => x.Worker == worker && x.Shift.Id != shiftId && x.Shift.State != ShiftState.Cancelled
+                                             && x.Shift.StartsAt < endsAt && x.Shift.EndsAt > startsAt)
+                                 .Select(x => x.Shift.Title).FirstOrDefault();
+      if (clash != null) { throw new ValidationException(RotaName(worker) + " is on " + clash + " then."); }
+    }
+  }
+  shift.StartsAt = startsAt;
+  shift.EndsAt = endsAt;
+  shift.Needed = needed;
+  if (moved && shift.State == ShiftState.Published) {
+    foreach (var a in crew) { ShiftReminder.RaiseRearm(a); }
+    Raise(new ShiftChanged { Shift = shift, Workers = crew.Select(a => a.Worker).ToList() });
+  }
+  UnitOfWork.Commit();
+}
+
+/// Put drafts on the rota: every draft starting in `from`–`to`. Answers how many. The people on them are told once
+/// (`ShiftsPublished`), and their reminders armed.
+[Server, Authorize(ManagesShifts)]
+[SuppressWarning("cost-unbounded-read")]   // a week's drafts: a manager publishes what they built, however many
+public int PublishShifts(DateTime from, DateTime to) {
+  var drafts = Shift.Where(s => s.State == ShiftState.Draft && s.StartsAt >= from && s.StartsAt < to).ToList();
+  if (drafts.Count == 0) { return 0; }
+  var now = DateTime.UtcNow;
+  var ids = drafts.Select(s => s.Id).ToList();
+  foreach (var s in drafts) { s.State = ShiftState.Published; s.PublishedAt = now; }
+  var crew = ShiftAssignment.Include(a => a.Worker).Where(a => ids.Contains(a.Shift.Id)).ToList();
+  foreach (var a in crew) { ShiftReminder.RaiseRearm(a); }
+  var workers = crew.Select(a => a.Worker).DistinctBy(w => w.Id).ToList();
+  Raise(new ShiftsPublished { Shifts = drafts, Workers = workers });
+  UnitOfWork.Commit();
+  return drafts.Count;
+}
+
+/// Publish one shift.
+[Server, Authorize(ManagesShifts)]
+public void PublishShift(Shift shift) {
+  if (shift.State != ShiftState.Draft) { return; }
+  PublishShifts(shift.StartsAt, shift.StartsAt.AddSeconds(1));
+}
+
+/// Cancel a shift: nobody can join it, nobody is reminded of it, and the people on it are named in `ShiftCancelled`.
+/// Their places are kept, so who was on it stays on record. Idempotent.
+[Server, Authorize(ManagesShifts)]
+public void CancelShift(Shift shift, string reason = "") {
+  if (shift.State == ShiftState.Cancelled) { return; }
+  var crew = CrewOf(shift);
+  if (shift.State == ShiftState.Draft) { throw new ValidationException("A draft is deleted, not cancelled."); }
+  shift.CancelledAt = DateTime.UtcNow;
+  shift.CancelReason = reason.Trim();
+  shift.State = ShiftState.Cancelled;
+  foreach (var a in crew) { ShiftReminder.RaiseStop(a); }
+  Raise(new ShiftCancelled { Shift = shift, Workers = crew.Select(a => a.Worker).ToList() });
+  UnitOfWork.Commit();
+}
+
+/// Delete a draft — one that never went on the rota — with the places on it.
+[Server, Authorize(ManagesShifts)]
+public void DeleteDraftShift(Shift shift) {
+  if (shift.State != ShiftState.Draft) { throw new ValidationException("A shift on the rota is cancelled, not deleted."); }
+  foreach (var a in CrewOf(shift)) { ShiftReminder.RaiseStop(a); a.Delete(); }
+  shift.Delete();
+  UnitOfWork.Commit();
+}
+
+/// Copy the week starting `fromMonday` to the week starting `toMonday` as drafts — the same times on the rota's clock,
+/// the same positions and headcounts, nobody on them. Cancelled shifts are not copied. Answers how many were made.
+[Server, Authorize(ManagesShifts)]
+[SuppressWarning("cost-unbounded-read")]   // one week of shifts
+public int CopyWeek(DateOnly fromMonday, DateOnly toMonday) {
+  var from = RotaDayStart(RotaWeekOf(fromMonday));
+  var to = RotaDayStart(RotaWeekOf(fromMonday).AddDays(7));
+  var days = RotaWeekOf(toMonday).DayNumber - RotaWeekOf(fromMonday).DayNumber;
+  var made = 0;
+  foreach (var s in Shift.Where(s => s.StartsAt >= from && s.StartsAt < to && s.State != ShiftState.Cancelled).ToList()) {
+    var startLocal = RotaLocal(s.StartsAt);
+    var endLocal = RotaLocal(s.EndsAt);
+    var startsAt = RotaZone().Resolve(DateOnly.FromDateTime(startLocal).AddDays(days), TimeOnly.FromDateTime(startLocal));
+    var endsAt = RotaZone().Resolve(DateOnly.FromDateTime(endLocal).AddDays(days), TimeOnly.FromDateTime(endLocal));
+    new Shift { Title = s.Title, Position = s.Position, StartsAt = startsAt, EndsAt = endsAt, BreakMinutes = s.BreakMinutes,
+                Needed = s.Needed, Location = s.Location, Note = s.Note };
+    made = made + 1;
+  }
+  UnitOfWork.Commit();
+  return made;
+}
+
+// ── hours ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One person's hours over a period.
+public class WorkerHours {
+  public Guid Worker;
+  public string Name = "";
+  public int Shifts;
+  public decimal Hours;
+}
+
+/// Each person's shifts and hours that start in `from`–`to` (cancelled ones left out), most hours first — for payroll,
+/// fairness, and the hours cap. Read as the caller: a manager sees every place, drafts too; a worker what the published
+/// rota shows.
+[SuppressWarning("cost-unbounded-read")]   // a period's places: an hours report is every one of them
+public List<WorkerHours> HoursBetween(DateTime from, DateTime to) {
+  var rows = ShiftAssignment.Include(a => a.Shift).Include(a => a.Worker)
+    .Where(a => a.Shift.State != ShiftState.Cancelled && a.Shift.StartsAt >= from && a.Shift.StartsAt < to).ToList();
+  List<WorkerHours> result = [];
+  foreach (var a in rows) {
+    var line = result.FirstOrDefault(h => h.Worker == a.Worker.Id);
+    if (line == null) { line = new WorkerHours { Worker = a.Worker.Id, Name = RotaName(a.Worker) }; result.Add(line); }
+    line.Shifts = line.Shifts + 1;
+    line.Hours = line.Hours + ShiftHours(a.Shift);
+  }
+  return result.OrderByDescending(h => h.Hours).ThenBy(h => h.Name).ToList();
+}
+
+/// `worker`'s hours in `from`–`to`.
+public decimal HoursOf(Principal worker, DateTime from, DateTime to) {
+  var line = HoursBetween(from, to).FirstOrDefault(h => h.Worker == worker.Id);
+  return line == null ? 0m : line.Hours;
+}
+
+/// A worker's places, those still to come first (soonest first), then the ones behind them (latest first).
+public List<ShiftAssignment> ShiftsOf(Principal worker, int take = 100) {
+  var now = DateTime.UtcNow;
+  var ahead = ShiftAssignment.Include(a => a.Shift).Where(a => a.Worker == worker && a.Shift.EndsAt > now)
+                             .OrderBy(a => a.Shift.StartsAt).Take(take).ToList();
+  var behind = ShiftAssignment.Include(a => a.Shift).Where(a => a.Worker == worker && a.Shift.EndsAt <= now)
+                              .OrderByDescending(a => a.Shift.StartsAt).Take(take).ToList();
+  ahead.AddRange(behind);
+  return ahead;
+}
+
+/// Published shifts still to come with a free place that `worker` may take now, soonest first.
+public List<Shift> OpenShiftsFor(Principal worker, int take = 30) {
+  var now = DateTime.UtcNow;
+  var candidates = Shift.Where(s => s.State == ShiftState.Published && s.StartsAt > now).OrderBy(s => s.StartsAt).Take(200).ToList();
+  return candidates.Where(s => OpenPlaces(s) > 0 && WhyNotOnShift(s, worker) == "").Take(take).ToList();
+}

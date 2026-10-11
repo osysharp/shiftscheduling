@@ -1,0 +1,28 @@
+// Osysharp.ShiftScheduling — the staff rota: shifts with a number of places, built as a draft and published, filled by managers
+// or claimed by the people who work them, with time off, cover and swaps, hours, and a reminder before each shift.
+//
+// Positions and what working one requires (a key the app answers — a qualifications kit can), numbered places that are
+// never over-filled, one place per person a shift, no overlaps, approved time off and weekly unavailability respected,
+// a weekly hours cap, the app's own sign-up rules, cover requests and swaps with a manager's approval, copying a week,
+// hours per person and period, and a durable reminder before every shift — with a worker's page, a manager's week and a
+// requests page.
+//
+// ⚑ THE APP SAYS WHO: `policy ManagesShifts => IsManager;` (builds and publishes the rota, assigns anybody, approves time
+//   off and cover) and `policy WorksShifts => IsStaff;` (sees the published rota, claims open shifts, asks for time off
+//   and cover). What a worker may do alone — claim, drop, swap without approval — is a setting.
+// ⚑ EVERY RULE HOLDS BY CONSTRUCTION. A place is taken, given up or handed over only by the kit's functions; a shift's
+//   times, headcount and state change only through them; each refusal is a sentence a person can be shown.
+package Osysharp.ShiftScheduling {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "a staff rota — shifts with a number of places, positions and what working one requires (answered by the app, or a qualifications kit), drafts published in one go, places a manager assigns or a worker claims (never over-filled, one place a shift, no overlaps, approved time off, weekly unavailability and an hours cap respected, the app's own rules asked), cover requests and swaps with approval, copying a week, hours per person and period, and a durable reminder before every shift — with a worker's my-shifts page, a manager's week and a requests page.";
+  pairsWith   "Osysharp.UserManagement: managers give staff their roles, and take them back, with a record of who changed what";
+  pairsWith   "Osysharp.Qualifications: a position's requirements answered by the qualifications a person holds";
+  model "model/**/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.Content)]`): why somebody asked for time off or cover.
+  personal Content;
+  use Osysharp.Identity@0;   // `Principal`: who works a shift
+  use Osysharp.Ui;           // the pages
+  use Osysharp.Workflow;     // the reminder before each shift
+  tests "tests";
+}

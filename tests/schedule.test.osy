@@ -1,0 +1,161 @@
+// Building the week: drafts published in one go, a shift moved or shrunk only when that leaves nobody stranded, a
+// cancelled shift keeping its crew on record, a week copied, hours added up, time off asked for and answered — and the
+// reminder before every shift.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+using Osysharp.Workflow;
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_draft_week_is_invisible_to_baristas_until_it_is_published() {
+  OnShift(Ada, "Weekend brunch");
+  OnShift(Bo, "Weekend brunch");
+  runas(Ada) {
+    Assert.Equal(0, Shift.Count(s => s.Title == "Weekend brunch"));
+    Assert.Equal(0, ShiftsOf(Ada).Count);
+  }
+  Assert.Equal(1, PublishShifts(At(0, 0), At(7, 0)));
+  runas(Ada) { Assert.Equal(1, ShiftsOf(Ada).Count); }
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "published" && h.Detail == "1:2"));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_shift_is_never_cut_below_the_places_taken_nor_moved_onto_a_clash() {
+  OnShift(Ada, "Opening");
+  OnShift(Bo, "Opening");
+  var opening = ShiftNamed("Opening");
+  Assert.Equal("Somebody holds place 2, so the shift cannot need fewer than 2. Take them off first.",
+               Assert.Throws<ValidationException>(() => UpdateShift(opening, opening.StartsAt, opening.EndsAt, 1)).Message);
+  OnShift(Bo, "Closing");
+  Assert.Equal("Bo Lindqvist is on Closing then.",
+               Assert.Throws<ValidationException>(() => UpdateShift(opening, At(1, 9), At(1, 17), 2)).Message);
+  UpdateShift(opening, At(1, 6), At(1, 11), 3);
+  Assert.Equal(3, ShiftNamed("Opening").Needed);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "changed" && h.Detail == "Opening:2"));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void even_the_lead_cannot_write_a_shifts_times_or_state_directly() {
+  var opening = ShiftNamed("Opening");
+  Assert.Denied(() => { opening.Needed = 9; UnitOfWork.Commit(); });
+  Assert.Denied(() => { opening.StartsAt = At(1, 5); UnitOfWork.Commit(); });
+  Assert.Denied(() => { opening.State = ShiftState.Cancelled; UnitOfWork.Commit(); });
+  Assert.Denied(() => { opening.Delete(); UnitOfWork.Commit(); });
+  opening.Note = "Bring the float";
+  UnitOfWork.Commit();
+  Assert.Equal("Bring the float", ShiftNamed("Opening").Note);
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_cancelled_shift_keeps_its_crew_on_record_and_tells_them() {
+  OnShift(Ada, "Closing");
+  OnShift(Bo, "Closing");
+  CancelShift(ShiftNamed("Closing"), "Burst pipe");
+  var closing = ShiftNamed("Closing");
+  Assert.Equal(ShiftState.Cancelled, closing.State);
+  Assert.Equal(2, CrewOf(closing).Count);
+  Assert.Equal(0, OpenPlaces(closing));
+  runas(Cy) { Assert.Equal("This shift is cancelled.", ClaimShift(closing).Message); }
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "cancelled" && h.Detail == "Closing:2"));
+  Assert.Equal("A draft is deleted, not cancelled.",
+               Assert.Throws<ValidationException>(() => CancelShift(ShiftNamed("Weekend brunch"))).Message);
+  DeleteDraftShift(ShiftNamed("Weekend brunch"));
+  Assert.Equal(0, Shift.Count(s => s.Title == "Weekend brunch"));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_week_is_copied_as_drafts_with_nobody_on_them() {
+  OnShift(Ada, "Opening");
+  Assert.Equal(4, CopyWeek(new DateOnly(2026, 11, 2), new DateOnly(2026, 11, 9)));
+  var next = Shift.Where(s => s.StartsAt >= At(7, 0)).OrderBy(s => s.StartsAt).ToList();
+  Assert.Equal(4, next.Count);
+  Assert.Equal(At(8, 7), next[0].StartsAt);
+  Assert.Equal(ShiftState.Draft, next[0].State);
+  Assert.Equal(0, ShiftAssignment.Count(a => a.Shift.StartsAt >= At(7, 0)));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void hours_are_added_up_per_person_less_breaks() {
+  OnShift(Ada, "Opening");
+  OnShift(Ada, "Espresso");
+  OnShift(Bo, "Closing");
+  var hours = HoursBetween(At(0, 0), At(7, 0));
+  Assert.Equal(2, hours.Count);
+  Assert.Equal("Ada Moreno", hours[0].Name);
+  Assert.Equal(9.5m, hours[0].Hours);
+  Assert.Equal(2, hours[0].Shifts);
+  Assert.Equal(5m, HoursOf(Bo, At(0, 0), At(7, 0)));
+  // A barista reads what the published rota shows — a draft's places are not in it.
+  OnShift(Cy, "Weekend brunch");
+  Assert.Equal(3, HoursBetween(At(0, 0), At(7, 0)).Count);
+  runas(Bo) { Assert.Equal(2, HoursBetween(At(0, 0), At(7, 0)).Count); }
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void time_off_is_asked_for_and_the_lead_hears_which_shifts_it_touches() {
+  OnShift(Bo, "Closing");
+  var request = RequestTimeOff(new DateOnly(2026, 11, 3), new DateOnly(2026, 11, 4), "Family visit");
+  Assert.Equal("You have already asked for time off on some of those days.",
+               Assert.Throws<ValidationException>(() => RequestTimeOff(new DateOnly(2026, 11, 4), new DateOnly(2026, 11, 4))).Message);
+  Assert.Equal("Time off cannot start in the past.",
+               Assert.Throws<ValidationException>(() => RequestTimeOff(new DateOnly(2026, 11, 1), new DateOnly(2026, 11, 1))).Message);
+  runas(Dana) {
+    var clashes = DecideTimeOff(request, true);
+    Assert.Equal(1, clashes.Count);
+    Assert.Equal("Closing", clashes[0].Shift.Title);
+  }
+  Assert.Equal(TimeOffState.Approved, TimeOffRequest.Single(r => r.Id == request.Id).State);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "timeoffdecided" && h.Detail == "Bo Lindqvist:Approved"));
+}
+
+[Test(Cafe)]
+[runas(Bo)]
+void the_reminder_goes_out_twelve_hours_before_and_only_once() {
+  var a = ClaimShift(ShiftNamed("Closing")).Assignment;
+  Workflow.Settle(a);
+  TestClock.Set(At(1, 3));
+  Workflow.Settle(a);
+  Background.Settle();
+  Assert.Equal(0, HeardCount("reminder"));
+  TestClock.Set(At(1, 5));
+  Workflow.Settle(a);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "reminder" && h.Detail == "Closing:Bo Lindqvist"));
+  Assert.Equal(ReminderState.Sent, ShiftAssignment.Single(x => x.Id == a.Id).Reminder);
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_draft_is_not_reminded_and_a_place_taken_inside_the_lead_is_reminded_at_once() {
+  var brunch = OnShift(Ada, "Weekend brunch");
+  TestClock.Set(At(4, 22));
+  Workflow.Settle(brunch);
+  Background.Settle();
+  Assert.Equal(0, HeardCount("reminder"));
+  PublishShifts(At(0, 0), At(7, 0));
+  Workflow.Settle(brunch);
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "reminder" && h.Detail == "Weekend brunch:Ada Moreno"));
+}
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_taken_off_place_is_never_reminded() {
+  var a = OnShift(Bo, "Closing");
+  Unassign(a);
+  TestClock.Set(At(1, 5));
+  Background.Settle();
+  Assert.Equal(0, HeardCount("reminder"));
+}
