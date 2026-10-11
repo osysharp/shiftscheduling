@@ -1,0 +1,35 @@
+{
+  "platform": {
+    "version": "0.9.0"
+  },
+  "entries": [
+    {
+      "name": "Osysharp.ShiftScheduling.Qualifications",
+      "kind": "package",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/shift-scheduling-qualifications",
+      "included": "completes Osysharp.ShiftScheduling \u002B Osysharp.Qualifications"
+    }
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform",
+      "github"
+    ],
+    "notIncluded": [
+      {
+        "name": "Osysharp.Privacy.Qualifications",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.Qualifications, and this app does not use \u0060Osysharp.Privacy\u0060."
+      },
+      {
+        "name": "Osysharp.Privacy.ShiftScheduling",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.ShiftScheduling, and this app does not use \u0060Osysharp.Privacy\u0060."
+      },
+      {
+        "name": "Osysharp.Privacy.UserAccounts",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.UserAccounts, and this app does not use \u0060Osysharp.Privacy\u0060."
+      }
+    ]
+  }
+}

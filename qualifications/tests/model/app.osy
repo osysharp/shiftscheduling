@@ -1,0 +1,32 @@
+// The medical tent's roles and its answers to both kits.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+using Osysharp.Qualifications;
+
+[Role] enum TentRole { Authenticator, Volunteer, Coordinator }
+
+policy IsVolunteer => RoleGrant.Any(g => g.Member == user && g.Role == TentRole.Volunteer);
+policy IsCoordinator => RoleGrant.Any(g => g.Member == user && g.Role == TentRole.Coordinator);
+
+/// The coordinator builds the rota and records certificates; volunteers sign up.
+policy ManagesShifts => IsCoordinator;
+policy WorksShifts => IsVolunteer;
+policy IssuesQualifications => IsCoordinator;
+
+app.Accounts = new AccountsSetup { AppName = "Meadow Festival Medical", SignupRole = TentRole.Volunteer };
+
+/// Doctors on the festival's own register count as first-aiders whatever their certificate says — the tent's own answer
+/// beside the qualifications kit's. A requirement is met when either confirms it.
+entity MedicalRegister {
+  [Required("Whose registration is it?")] Principal Doctor;
+  security { allow read when IsAuthenticated; allow create when IsCoordinator; }
+}
+
+public class RegisteredDoctors : IShiftRequirements {
+  public string? Unmet(Principal worker, string requirement, DateTime on) {
+    if (requirement == "first-aid" && MedicalRegister.Any(m => m.Doctor == worker)) { return null; }
+    return "not on the medical register.";
+  }
+}

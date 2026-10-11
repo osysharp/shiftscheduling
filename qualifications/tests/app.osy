@@ -1,0 +1,14 @@
+// The producer's test project for Osysharp.ShiftScheduling.Qualifications — a festival's medical tent: volunteers sign up for
+// first-aid posts, and only somebody whose first-aid certificate holds on the day of the shift may take one.
+app ShiftSchedulingQualificationsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.EmailTemplates@0;
+  use Osysharp.UserAccounts@1;
+  use Osysharp.ShiftScheduling@0;
+  use Osysharp.Qualifications@0;
+  // Osysharp.ShiftScheduling.Qualifications, the package under test, is not written: it arrives by itself because this app uses
+  // ShiftScheduling and Qualifications, which it completes (`osy lock` includes it and says so).
+}

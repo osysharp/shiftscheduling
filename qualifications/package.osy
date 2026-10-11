@@ -1,0 +1,21 @@
+// Osysharp.ShiftScheduling.Qualifications — a position's requirements answered by the qualifications people hold. A requirement's
+// key is a qualification kind's key: an "Espresso bar" position requiring `food-hygiene` refuses anybody without a food
+// hygiene certificate in force on the day of the shift, with the qualifications kit's own sentence ("Food hygiene
+// certificate expired on 3 May 2026.").
+//
+// ⚑ A BRIDGE, SO NEITHER KIT DEPENDS ON THE OTHER: the rota asks `IShiftRequirements` and Qualifications answers
+//   `CheckQualification`. This package is the one class between them. An app using both writes nothing: it arrives by
+//   itself (`completes` below — `osy lock` includes it and says so).
+// ⚑ THE CHECK READS AS THE CALLER. A worker claiming a shift reads their own qualifications; a manager putting somebody on
+//   needs to read theirs — answer `policy ChecksQualifications => IsManager;` (or whoever builds the rota).
+package Osysharp.ShiftScheduling.Qualifications {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "a rota position's requirements answered by Osysharp.Qualifications — nobody is put on a shift needing a qualification they do not hold in force that day, and the refusal says why in the qualifications kit's words.";
+  completes   Osysharp.ShiftScheduling@0, Osysharp.Qualifications@0;
+  model "model/*.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.ShiftScheduling@0;
+  use Osysharp.Qualifications@0;
+  tests "tests";
+}

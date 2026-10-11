@@ -1,0 +1,15 @@
+namespace Osysharp.ShiftScheduling.Qualifications;
+
+using Osysharp.Identity;
+using Osysharp.ShiftScheduling;
+using Osysharp.Qualifications;
+
+/// Answers a position's requirement from the qualifications a person holds: the requirement's key is a qualification kind's
+/// key, and the person must hold one in force on the day the shift starts. Found by the rota — nothing is wired.
+public class QualificationRequirements : IShiftRequirements {
+  public string? Unmet(Principal worker, string requirement, DateTime on) {
+    if (!QualificationKind.Any(k => k.Key == requirement)) { return "no qualification of that kind is recognised here."; }
+    var check = CheckQualification(worker, requirement, DateOnly.FromDateTime(on));
+    return check.IsValid ? null : check.Reason;
+  }
+}

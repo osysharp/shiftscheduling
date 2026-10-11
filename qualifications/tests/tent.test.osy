@@ -1,0 +1,55 @@
+// A first-aid post needs a first-aid certificate that holds on the day of the shift — asked of the qualifications kit.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+using Osysharp.Qualifications;
+
+principal Ada => User.Single(u => u.Email == "ada@tent.test");
+principal Bo => User.Single(u => u.Email == "bo@tent.test");
+principal Cat => User.Single(u => u.Email == "cat@tent.test");
+
+[TestFixture]
+void Tent() {
+  TestClock.Set(new DateTime(2026, 7, 1, 8, 0, 0));
+  var ada = new User { Email = "ada@tent.test", DisplayName = "Ada Moreno" };
+  var bo = new User { Email = "bo@tent.test", DisplayName = "Bo Lindqvist" };
+  var cat = new User { Email = "cat@tent.test", DisplayName = "Cat Ng" };
+  new RoleGrant { Member = ada, Role = TentRole.Volunteer };
+  new RoleGrant { Member = bo, Role = TentRole.Volunteer };
+  new RoleGrant { Member = cat, Role = TentRole.Coordinator };
+  var firstAid = new QualificationKind { Key = "first-aid", Name = "First aid certificate", Category = QualificationCategory.Certificate, ValidForMonths = 36 };
+  var post = new ShiftPosition { Name = "First aid post" };
+  new PositionRequirement { Position = post, Key = "first-aid", Label = "a first aid certificate" };
+  new Shift { Title = "Main stage post", Position = post, StartsAt = new DateTime(2026, 7, 10, 12, 0, 0), EndsAt = new DateTime(2026, 7, 10, 18, 0, 0),
+              Needed = 2, State = ShiftState.Published };
+  // Ada's certificate holds through the festival; Bo's lapses on 5 July, before it.
+  new Qualification { Holder = ada, Kind = firstAid, IssuedOn = new DateOnly(2025, 3, 1), ValidUntil = new DateOnly(2028, 2, 29), RecordedBy = cat };
+  new Qualification { Holder = bo, Kind = firstAid, IssuedOn = new DateOnly(2023, 7, 6), ValidUntil = new DateOnly(2026, 7, 5), RecordedBy = cat };
+}
+
+[Test(Tent)]
+[runas(Ada)]
+void a_volunteer_whose_certificate_holds_on_the_day_takes_the_post() {
+  Assert.True(ClaimShift(Shift.Single(s => s.Title == "Main stage post")).IsAssigned);
+}
+
+[Test(Tent)]
+[runas(Bo)]
+void a_certificate_that_lapses_before_the_shift_refuses_it_in_the_qualifications_kits_words() {
+  // It still holds today — what counts is the day of the shift.
+  Assert.True(HasValidQualification(Bo, "first-aid"));
+  Assert.Equal("First aid post needs a first aid certificate: First aid certificate expired on 5 July 2026.",
+               ClaimShift(Shift.Single(s => s.Title == "Main stage post")).Message);
+  runas(Cat) {
+    RecordQualification(Bo, "first-aid");
+    Assert.True(AssignShift(Shift.Single(s => s.Title == "Main stage post"), Bo).IsAssigned);
+  }
+}
+
+[Test(Tent)]
+[runas(Bo)]
+void a_doctor_on_the_festivals_own_register_meets_it_whatever_the_certificate_says() {
+  runas(Cat) { new MedicalRegister { Doctor = Bo }; UnitOfWork.Commit(); }
+  Assert.True(ClaimShift(Shift.Single(s => s.Title == "Main stage post")).IsAssigned);
+}
