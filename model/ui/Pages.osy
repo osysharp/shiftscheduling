@@ -191,7 +191,7 @@ public component MyShifts() {
       if (problem != "") { Alert(problem, tone: Tone.Danger); }
       Stack(gap: 2) {
         SectionLabel("Coming up");
-        Stack(gap: 3, role: UiRole.List, label: "Coming up") {
+        Stack(gap: 3, role: (view.Places.Count == 0) ? UiRole.Group : UiRole.List, label: "Coming up") {
           if (view.Places.Count == 0) { EmptyState("No shifts yet", body: "Shifts you are put on, or pick up, appear here once they are on the rota."); }
           foreach (var p in view.Places) {
             ShiftCardView(p.Shift, note: p.Cover) {
@@ -217,7 +217,7 @@ public component MyShifts() {
       }
       Stack(gap: 2) {
         SectionLabel("Open shifts");
-        Stack(gap: 3, role: UiRole.List, label: "Open shifts") {
+        Stack(gap: 3, role: (view.Open.Count == 0) ? UiRole.Group : UiRole.List, label: "Open shifts") {
           if (view.Open.Count == 0) { EmptyState("Nothing open for you", body: "A shift with a free place you can work appears here."); }
           foreach (var s in view.Open) {
             ShiftCardView(s) { Button("Claim", onPress: () => Claim(s), size: Size.Sm, tone: Tone.Primary); }
@@ -231,7 +231,7 @@ public component MyShifts() {
             Button("Ask for time off", onPress: StartOff, size: Size.Sm);
           }
           Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-                role: UiRole.List, label: "Time off") {
+                role: (view.TimeOff.Count == 0) ? UiRole.Group : UiRole.List, label: "Time off") {
             if (view.TimeOff.Count == 0) { Box(p: 4) { Text("No time off asked for.", color: Colors.TextMuted); } }
             foreach (var l in view.TimeOff) {
               Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Days) {
@@ -251,7 +251,7 @@ public component MyShifts() {
             Button("Add", onPress: StartBusy, size: Size.Sm);
           }
           Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-                role: UiRole.List, label: "When you are not free") {
+                role: (view.NotFree.Count == 0) ? UiRole.Group : UiRole.List, label: "When you are not free") {
             if (view.NotFree.Count == 0) { Box(p: 4) { Text("Free any time.", color: Colors.TextMuted); } }
             foreach (var u in view.NotFree) {
               Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: UnavailabilityText(u)) {
@@ -467,7 +467,7 @@ public component RotaWeek() {
       Stack(gap: 2) {
         SectionLabel("Hours this week");
         Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-              role: UiRole.List, label: "Hours this week") {
+              role: (view.People.Count == 0) ? UiRole.Group : UiRole.List, label: "Hours this week") {
           if (view.People.Count == 0) { Box(p: 4) { Text("Nobody is on a shift this week yet.", color: Colors.TextMuted); } }
           foreach (var p in view.People) {
             Row(gap: 3, align: Align.Center, px: 4, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: p.Name) {
@@ -591,7 +591,7 @@ public component RotaRequests() {
       Stack(gap: 2) {
         SectionLabel("Time off waiting");
         Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-              role: UiRole.List, label: "Time off waiting") {
+              role: (waiting.Count == 0) ? UiRole.Group : UiRole.List, label: "Time off waiting") {
           if (waiting.Count == 0) { Box(p: 4) { EmptyState("Nothing waiting", body: "Requests for time off appear here."); } }
           foreach (var l in waiting) {
             Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Worker) {
@@ -607,7 +607,7 @@ public component RotaRequests() {
       }
       Stack(gap: 2) {
         SectionLabel("Cover waiting for approval");
-        Stack(gap: 3, role: UiRole.List, label: "Cover waiting for approval") {
+        Stack(gap: 3, role: (cover.Count == 0) ? UiRole.Group : UiRole.List, label: "Cover waiting for approval") {
           if (cover.Count == 0) { EmptyState("Nothing waiting", body: "When somebody takes a shift that was offered, it waits here for you."); }
           foreach (var c in cover) {
             ShiftCardView(c.Shift, note: c.Swap ? c.From + " and " + c.TakenBy + " swap — " + c.TakenBy + " gives " + c.SwapFor
@@ -621,7 +621,7 @@ public component RotaRequests() {
       Stack(gap: 2) {
         SectionLabel("Away");
         Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-              role: UiRole.List, label: "Away") {
+              role: (away.Count == 0) ? UiRole.Group : UiRole.List, label: "Away") {
           if (away.Count == 0) { Box(p: 4) { Text("Nobody is away.", color: Colors.TextMuted); } }
           foreach (var l in away) {
             Row(gap: 3, align: Align.Center, px: 4, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: l.Worker) {
@@ -681,7 +681,7 @@ public component RotaPositions() {
       if (done != "") { Alert(done, tone: Tone.Success); }
       if (problem != "") { Alert(problem, tone: Tone.Danger); }
       Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden,
-            role: UiRole.List, label: "Positions") {
+            role: (positions.Count == 0) ? UiRole.Group : UiRole.List, label: "Positions") {
         if (positions.Count == 0) { Box(p: 5) { EmptyState("No positions yet", body: "A shift can be for anyone; add a position when some work needs particular people."); } }
         foreach (var p in positions) {
           Stack(gap: 1, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: p.Name) {
