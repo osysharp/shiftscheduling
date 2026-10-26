@@ -371,9 +371,9 @@ public component RotaWeek() {
     problem = "";
     if (title.Trim() == "") { problem = "Give the shift a name."; return; }
     if (onDay == null) { problem = "Choose the day."; return; }
-    var startsAt = RotaZone().Resolve(onDay!.Value, starts);
+    var startsAt = RotaInstant(onDay!.Value, starts);
     // An end at or before the start is the next morning — a night shift.
-    var endsAt = RotaZone().Resolve(ends > starts ? onDay!.Value : onDay!.Value.AddDays(1), ends);
+    var endsAt = RotaInstant(ends > starts ? onDay!.Value : onDay!.Value.AddDays(1), ends);
     try {
       if (editingId == Guid.Empty) {
         AddShift(title, startsAt, endsAt, needed, position, breakMinutes, location, note);

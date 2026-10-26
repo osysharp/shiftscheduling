@@ -9,13 +9,22 @@ using Osysharp.Identity;
 // ── the rota's wall clock ───────────────────────────────────────────────────────────────────────────────────────────
 
 /// The rota's time zone (`ShiftSchedulingSetup.TimeZone`).
-public Zone RotaZone() { return Zone.Of(App.Setting<ShiftSchedulingSetup>().TimeZone); }
+public TimeZoneInfo RotaZone() { return TimeZoneInfo.FindSystemTimeZoneById(App.Setting<ShiftSchedulingSetup>().TimeZone); }
 
 /// A moment as the rota's wall clock reads it.
-public DateTime RotaLocal(DateTime instant) { return instant.InZone(RotaZone()); }
+public DateTime RotaLocal(DateTime instant) { return TimeZoneInfo.ConvertTimeFromUtc(instant, RotaZone()); }
+
+/// The moment the rota's wall clock reads `at` on `day`. A time the clocks skip in spring (02:30 on the night summer time
+/// begins) never shows on the wall, so it is read as that time just after the jump — a shift written for it starts at
+/// 03:30 rather than refusing to be saved.
+public DateTime RotaInstant(DateOnly day, TimeOnly at) {
+  var wall = day.ToDateTime(at);
+  if (RotaZone().IsInvalidTime(wall)) { wall = wall.AddHours(1); }
+  return TimeZoneInfo.ConvertTimeToUtc(wall, RotaZone());
+}
 
 /// The moment a day starts on the rota's clock.
-public DateTime RotaDayStart(DateOnly day) { return RotaZone().Resolve(day, new TimeOnly(0, 0)); }
+public DateTime RotaDayStart(DateOnly day) { return RotaInstant(day, new TimeOnly(0, 0)); }
 
 /// The Monday of the week `day` falls in.
 public DateOnly RotaWeekOf(DateOnly day) { return day.AddDays(-(((int)day.DayOfWeek + 6) % 7)); }
@@ -201,8 +210,8 @@ public bool UnavailableDuring(Unavailability u, DateTime starts, DateTime ends) 
   while (day <= last) {
     if (day.DayOfWeek == u.Day) {
       var wholeDay = u.From == new TimeOnly(0, 0) && u.Until == new TimeOnly(0, 0);
-      var from = RotaZone().Resolve(day, u.From);
-      var until = wholeDay ? RotaDayStart(day.AddDays(1)) : RotaZone().Resolve(day, u.Until);
+      var from = RotaInstant(day, u.From);
+      var until = wholeDay ? RotaDayStart(day.AddDays(1)) : RotaInstant(day, u.Until);
       if (from < ends && until > starts) { return true; }
     }
     day = day.AddDays(1);

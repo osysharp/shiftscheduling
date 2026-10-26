@@ -132,8 +132,8 @@ public int CopyWeek(DateOnly fromMonday, DateOnly toMonday) {
   foreach (var s in Shift.Where(s => s.StartsAt >= from && s.StartsAt < to && s.State != ShiftState.Cancelled).ToList()) {
     var startLocal = RotaLocal(s.StartsAt);
     var endLocal = RotaLocal(s.EndsAt);
-    var startsAt = RotaZone().Resolve(DateOnly.FromDateTime(startLocal).AddDays(days), TimeOnly.FromDateTime(startLocal));
-    var endsAt = RotaZone().Resolve(DateOnly.FromDateTime(endLocal).AddDays(days), TimeOnly.FromDateTime(endLocal));
+    var startsAt = RotaInstant(DateOnly.FromDateTime(startLocal).AddDays(days), TimeOnly.FromDateTime(startLocal));
+    var endsAt = RotaInstant(DateOnly.FromDateTime(endLocal).AddDays(days), TimeOnly.FromDateTime(endLocal));
     new Shift { Title = s.Title, Position = s.Position, StartsAt = startsAt, EndsAt = endsAt, BreakMinutes = s.BreakMinutes,
                 Needed = s.Needed, Location = s.Location, Note = s.Note };
     made = made + 1;
