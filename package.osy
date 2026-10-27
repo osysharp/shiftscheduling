@@ -13,7 +13,7 @@
 // ⚑ EVERY RULE HOLDS BY CONSTRUCTION. A place is taken, given up or handed over only by the kit's functions; a shift's
 //   times, headcount and state change only through them; each refusal is a sentence a person can be shown.
 package Osysharp.ShiftScheduling {
-  version     "0.4.0";
+  version     "0.5.0";
   minPlatform "0.17.0";
   summary     "a staff rota — shifts with a number of places, positions and what working one requires (answered by the app, or a qualifications kit), drafts published in one go, places a manager assigns or a worker claims (never over-filled, one place a shift, no overlaps, approved time off, weekly unavailability and an hours cap respected, the app's own rules asked), cover requests and swaps with approval, copying a week, hours per person and period, and a durable reminder before every shift — with a worker's my-shifts page, a manager's week and a requests page.";
   pairsWith   "Osysharp.UserManagement: managers give staff their roles, and take them back, with a record of who changed what";

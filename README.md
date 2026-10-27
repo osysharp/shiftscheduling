@@ -93,3 +93,97 @@ copy of their data and are erased when they ask.
 
 [github.com/osysharp/shiftscheduling](https://github.com/osysharp/shiftscheduling). Its tests (`tests/`) are a café's: every
 behaviour above, each seam shown, and the pages under `osy test --pixels`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Test(Cafe)]
+[runas(Bo)]
+void a_barista_claims_an_open_place_and_gets_the_lowest_free_one() {
+  var first = ClaimShift(ShiftNamed("Opening"));
+  Assert.True(first.IsAssigned);
+  Assert.Equal("You are on Opening.", first.Message);
+  Assert.Equal(1, first.Assignment!.Slot);
+  runas(Ada) { Assert.Equal(2, ClaimShift(ShiftNamed("Opening")).Assignment!.Slot); }
+  runas(Cy) {
+    var full = ClaimShift(ShiftNamed("Opening"));
+    Assert.Equal(ShiftResult.Refused, full.Result);
+    Assert.Equal("This shift is full.", full.Message);
+  }
+  Assert.Equal(0, OpenPlaces(ShiftNamed("Opening")));
+}
+```
+
+From [`tests/assigning.test.osy`](tests/assigning.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+
+[Test(Cafe)]
+[runas(Ada)]
+void cover_is_taken_by_a_colleague_and_the_lead_approves_it() {
+  var mine = OnShift(Ada, "Opening");
+  var request = RequestCover(mine, "Sick child");
+  runas(Bo) {
+    Assert.Equal(1, CoverOffersFor(Bo).Count);
+    var taken = AcceptCover(request);
+    Assert.Equal(CoverState.Taken, taken.State);
+  }
+  Assert.Equal(Ada.Id, ShiftAssignment.Single(a => a.Id == mine.Id).Worker.Id);
+  runas(Dana) {
+    Assert.Equal(1, CoverAwaitingApproval().Count);
+    DecideCover(request, true);
+    var now = ShiftAssignment.Single(a => a.Id == mine.Id);
+    Assert.Equal(Bo.Id, now.Worker.Id);
+    Assert.Equal(1, now.Slot);
+  }
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "covered" && h.Detail == "Opening:Bo Lindqvist"));
+  Assert.Equal(1, HeardCount("covertaken"));
+}
+```
+
+From [`tests/cover.test.osy`](tests/cover.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.ShiftScheduling;
+using Osysharp.Workflow;
+
+[Test(Cafe)]
+[runas(Dana)]
+void a_draft_week_is_invisible_to_baristas_until_it_is_published() {
+  OnShift(Ada, "Weekend brunch");
+  OnShift(Bo, "Weekend brunch");
+  runas(Ada) {
+    Assert.Equal(0, Shift.Count(s => s.Title == "Weekend brunch"));
+    Assert.Equal(0, ShiftsOf(Ada).Count);
+  }
+  Assert.Equal(1, PublishShifts(At(0, 0), At(7, 0)));
+  runas(Ada) { Assert.Equal(1, ShiftsOf(Ada).Count); }
+  Background.Settle();
+  Assert.Equal(1, Heard.Count(h => h.Event == "published" && h.Detail == "1:2"));
+}
+```
+
+From [`tests/schedule.test.osy`](tests/schedule.test.osy).
+
+## Learn more
+
+- [The Osysharp.ShiftScheduling reference](https://osysharp.com/reference/ui/shift-scheduling-kit/)
+- [Osysharp.ShiftScheduling in the package catalogue](https://osysharp.com/packages/#osysharp-shiftscheduling)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
