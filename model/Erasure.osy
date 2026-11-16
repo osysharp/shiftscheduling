@@ -22,7 +22,7 @@ public int EraseRotaDataOf(Principal person) {
   foreach (var r in TimeOffRequest.Where(r => r.Worker == person).ToList()) { r.Delete(); n = n + 1; }
   foreach (var r in TimeOffRequest.Where(r => r.DecidedBy == person).ToList()) { r.DecidedBy = null; }
   foreach (var u in Unavailability.Where(u => u.Worker == person).ToList()) { u.Delete(); n = n + 1; }
-  foreach (var a in ShiftAssignment.Where(a => a.Worker == person).ToList()) { ShiftReminder.RaiseStop(a); a.Delete(); n = n + 1; }
+  foreach (var a in ShiftAssignment.Where(a => a.Worker == person).ToList()) { StopReminderOf(a.Id); a.Delete(); n = n + 1; }
   UnitOfWork.Commit();
   return n;
 }

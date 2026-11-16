@@ -33,6 +33,15 @@ void FireReminder(ShiftAssignment a) {
   Raise(new ShiftReminderDue { Assignment = a });
 }
 
+/// Stop a place's reminder before the place is deleted — in a commit of its own, so the run has stopped before the row
+/// goes, wherever this is called from: a raise inside a caller's `try` is held until that try completes, which would be
+/// after the delete (workflow-raise#in-a-try). Every verb that deletes a place calls this first.
+[CommitsAlone]
+void StopReminderOf(Guid place) {
+  var a = ShiftAssignment.FirstOrDefault(x => x.Id == place);
+  if (a != null) { ShiftReminder.RaiseStop(a!); }
+}
+
 public workflow ShiftReminder {
   Tracks    = ShiftAssignment.Reminder;
   Autostart = true;

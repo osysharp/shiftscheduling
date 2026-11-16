@@ -115,7 +115,7 @@ public void CancelShift(Shift shift, string reason = "") {
 [Server, Authorize(ManagesShifts)]
 public void DeleteDraftShift(Shift shift) {
   if (shift.State != ShiftState.Draft) { throw new ValidationException("A shift on the rota is cancelled, not deleted."); }
-  foreach (var a in CrewOf(shift)) { ShiftReminder.RaiseStop(a); a.Delete(); }
+  foreach (var a in CrewOf(shift)) { StopReminderOf(a.Id); a.Delete(); }
   shift.Delete();
   UnitOfWork.Commit();
 }

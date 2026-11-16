@@ -200,7 +200,7 @@ public void Unassign(ShiftAssignment assignment) {
   var shift = assignment.Shift;
   var worker = assignment.Worker;
   var slot = assignment.Slot;
-  ShiftReminder.RaiseStop(assignment);
+  StopReminderOf(assignment.Id);
   foreach (var c in ShiftCoverRequest.Where(c => c.Assignment == assignment || c.InExchangeFor == assignment).Take(50).ToList()) { c.Delete(); }
   assignment.Delete();
   Removed(shift, worker, slot);
@@ -218,7 +218,7 @@ public void DropShift(ShiftAssignment assignment) {
   }
   var shift = assignment.Shift;
   var slot = assignment.Slot;
-  ShiftReminder.RaiseStop(assignment);
+  StopReminderOf(assignment.Id);
   foreach (var c in ShiftCoverRequest.Where(c => c.Assignment == assignment || c.InExchangeFor == assignment).Take(50).ToList()) { c.Delete(); }
   assignment.Delete();
   Removed(shift, CurrentPrincipal(), slot);
