@@ -9,10 +9,11 @@
 // ⚑ THE CHECK READS AS THE CALLER. A worker claiming a shift reads their own qualifications; a manager putting somebody on
 //   needs to read theirs — answer `policy ChecksQualifications => IsManager;` (or whoever builds the rota).
 package Osysharp.ShiftScheduling.Qualifications {
-  version     "0.2.0";
-  minPlatform "0.14.0";
+  version     "0.3.0";
+  minPlatform "0.25.0";
   summary     "a rota position's requirements answered by Osysharp.Qualifications — nobody is put on a shift needing a qualification they do not hold in force that day, and the refusal says why in the qualifications kit's words.";
   completes   Osysharp.ShiftScheduling@0, Osysharp.Qualifications@0;
+  layout "Osysharp.ShiftScheduling.Qualifications" members;
   model "model/*.osy";
   use Osysharp.Identity@0;
   use Osysharp.ShiftScheduling@0;
